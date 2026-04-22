@@ -1,0 +1,23 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+# Spark/Hadoop
+spark/data/
+spark/historical_data.json
+*.log
+*.out
+
+# Docker
+volumes/mqtt/data/
+volumes/pgdata/
+volumes/minio_data/
+volumes/grafana_data/
+
+# OS
+.DS_Store
+Thmubs.db
