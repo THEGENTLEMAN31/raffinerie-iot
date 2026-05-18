@@ -32,10 +32,6 @@ INSERT INTO machine_config (machine_id, machine_type, enabled, target_temp, targ
 VALUES ('pipe-101', 'pipe', true, 95.0, 1.2)
 ON CONFLICT (machine_id) DO NOTHING;
 
-INSERT INTO machine_config (machine_id, machine_type, enabled, target_temp, target_vib)
-VALUES ('pump-303', 'pump', true, 95.0, 1.2)
-ON CONFLICT (machine_id) DO NOTHING;
-
 INSERT INTO alert_config (machine_id, type_capteur, seuil_anomalie)
 SELECT NULL, NULL, 0.7
 WHERE NOT EXISTS (SELECT 1 FROM alert_config WHERE machine_id IS NULL AND type_capteur IS NULL);
