@@ -1,6 +1,9 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, window, avg, expr, to_timestamp
-from pyspark.sql.types import StructType, StringType, FloatType
+from pyspark.sql.functions import col, from_json, window, avg, expr, to_timestamp, lag, udf, coalesce
+from pyspark.sql.types import StructType, StringType, FloatType, DoubleType
+from pyspark.ml import PipelineModel
+from pyspark.ml.linalg import VectorUDT
+from pyspark.sql import Window
 
 # 1. Définir le schéma attendu pour les messages JSON
 schema = StructType() \
@@ -79,6 +82,68 @@ def save_kpi_to_pg(batch_df, batch_id):
 kpi.writeStream \
     .foreachBatch(save_kpi_to_pg) \
     .option("checkpointLocation", "/tmp/checkpoint_kpi") \
+    .outputMode("append") \
+    .start()
+
+# 13. Chargement du modèle prédictif
+print("Chargement du modèle prédictif...")
+model = PipelineModel.load("/home/spark/.ivy2/predictive_model")
+print("Modèle chargé.")
+
+SEUIL_ALERTE = 0.7
+
+extract_prob = udf(lambda v: float(v[1]) if v else 0.0, DoubleType())
+
+# 14. Fonction d'inférence et d'alerte
+def predict_and_alert(batch_df, batch_id):
+    if batch_df.isEmpty():
+        return
+
+    window_spec = Window.partitionBy("machine_id", "type_capteur").orderBy("timestamp")
+
+    pred_df = batch_df \
+        .withColumn("v_lag1", lag("valeur", 1).over(window_spec)) \
+        .withColumn("v_lag2", lag("valeur", 2).over(window_spec)) \
+        .withColumn("v_lag3", lag("valeur", 3).over(window_spec)) \
+        .withColumn("v_lag4", lag("valeur", 4).over(window_spec)) \
+        .withColumn("v_lag5", lag("valeur", 5).over(window_spec))
+
+    pred_df = pred_df \
+        .withColumn("v_lag1", coalesce(col("v_lag1"), col("valeur"))) \
+        .withColumn("v_lag2", coalesce(col("v_lag2"), col("valeur"))) \
+        .withColumn("v_lag3", coalesce(col("v_lag3"), col("valeur"))) \
+        .withColumn("v_lag4", coalesce(col("v_lag4"), col("valeur"))) \
+        .withColumn("v_lag5", coalesce(col("v_lag5"), col("valeur")))
+
+    pred_df = pred_df \
+        .withColumn("slope_1", col("valeur") - col("v_lag1")) \
+        .withColumn("slope_3", (col("valeur") - col("v_lag3")) / 3)
+
+    predictions = model.transform(pred_df)
+    predictions = predictions.withColumn("proba", extract_prob(col("probability")))
+
+    predictions.select(
+        col("timestamp"),
+        col("machine_id"),
+        col("type_capteur"),
+        col("valeur"),
+        col("prediction"),
+        col("proba").alias("score_anomalie")
+    ).write \
+        .format("jdbc") \
+        .option("url", "jdbc:postgresql://timescaledb:5432/iotdb") \
+        .option("dbtable", "alertes_predictions") \
+        .option("user", "admin") \
+        .option("password", "admin") \
+        .option("driver", "org.postgresql.Driver") \
+        .mode("append") \
+        .save()
+
+# 15. Inférence temps réel sur le flux filtré
+filtrees.writeStream \
+    .trigger(processingTime="2 seconds") \
+    .foreachBatch(predict_and_alert) \
+    .option("checkpointLocation", "/tmp/checkpoint_inference") \
     .outputMode("append") \
     .start() \
     .awaitTermination()

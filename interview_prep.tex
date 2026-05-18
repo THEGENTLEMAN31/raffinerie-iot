@@ -1,0 +1,648 @@
+\documentclass[11pt,a4paper]{article}
+
+% ----- PACKAGES -----
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{geometry}
+\geometry{margin=2.2cm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{multicol}
+
+% ----- COLORS -----
+\definecolor{codebg}{rgb}{0.95,0.95,0.95}
+\definecolor{codegreen}{rgb}{0,0.5,0}
+\definecolor{codeblue}{rgb}{0,0,0.7}
+\definecolor{codered}{rgb}{0.7,0,0}
+\definecolor{darkgray}{rgb}{0.3,0.3,0.3}
+
+% ----- LISTINGS -----
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{codebg},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codeblue},
+    stringstyle=\color{codered},
+    basicstyle=\ttfamily\small,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray}
+}
+\lstset{style=mystyle}
+
+% ----- HEADER / FOOTER -----
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{Préparation Entretien -- Pipeline IoT Raffinerie}}
+\fancyhead[R]{\thepage}
+\fancyfoot[C]{}
+
+% ----- TITLE -----
+\title{\vspace{-2cm}\textbf{Préparation à l'Entretien Technique}\\[0.3em]
+\large Pipeline IoT Temps Réel et Maintenance Prédictive pour Raffinerie\\[0.2em]
+\small Niveau : Ingénieur Senior -- Architecte Solutions Data}
+\author{}
+\date{\today}
+
+% ============================================================
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+\vspace{1cm}
+
+\begin{center}
+\fbox{\parbox{0.9\textwidth}{\centering
+\textbf{Document de synthèse technique}\\[0.3em]
+Contient l'intégralité de l'architecture, la logique métier, la stratégie ML,\\[0.1em]
+et les questions d'entretien les plus critiques pour le projet.}}
+\end{center}
+
+\newpage
+\tableofcontents
+\newpage
+
+% ============================================================
+% SECTION 1 : INTRODUCTION & ARCHITECTURE
+% ============================================================
+\section{Introduction et Architecture Globale}
+
+\subsection{Écosystème Technique}
+
+Le projet met en œuvre une pipeline Big Data de bout en bout dédiée à la surveillance prédictive d'équipements industriels (échangeur thermique \texttt{pipe-101}, pompe \texttt{pump-303}). L'architecture repose sur une approche \emph{event-driven} découplée, où chaque couche a une responsabilité unique et interchangeable.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{|l|X|c|}
+\hline
+\textbf{Couche} & \textbf{Rôle} & \textbf{Technologie} \\
+\hline
+Acquisition & Génération de données synthétiques réalistes avec inertie physique & Python + \texttt{paho-mqtt} \\
+\hline
+Transport & Tampon asynchrone, permet le rejeu et lissse les pics de charge & MQTT (Mosquitto) $\rightarrow$ Kafka \\
+\hline
+File d'attente distribuée & Buffer de \emph{backpressure}, garantit la persistence et le rejeu & Kafka (Confluent) \\
+\hline
+Traitement & Streaming micro-batch, filtrage, KPI, inférence ML & Spark Structured Streaming 3.4.1 \\
+\hline
+Stockage temporel & Hypertables pour séries temporelles, requêtes \texttt{ORDER BY DESC} optimisées & TimescaleDB 2.14 (PG14) \\
+\hline
+Stockage froid / archive & Données brutes et datasets d'entraînement, interface S3 & MinIO \\
+\hline
+Visualisation & Dashboards temps réel, jauges, alertes colorimétriques & Grafana 10.2.3 \\
+\hline
+\end{tabularx}
+\end{center}
+
+\subsection{Flux de Données et Rôle de Chaque Brique}
+
+\subsubsection{MQTT (Mosquitto)}
+Protocole publish/subscribe extrêmement léger, adapté aux contraintes des capteurs IoT (bande passante réduite, consommation électrique minimale). Le simulateur publie sur deux topics distincts :
+
+\[
+\texttt{raffinerie/temp} \quad \text{et} \quad \texttt{raffinerie/vib}
+\]
+
+MQTT ne garantit pas la persistence : si le broker tombe, les messages non délivrés sont perdus. C'est la raison de l'étage suivant.
+
+\subsubsection{Pont MQTT $\rightarrow$ Kafka}
+\texttt{mqtt\_to\_kafka.py} s'abonne aux deux topics et publie chaque message dans le topic Kafka unique \texttt{sensor-data}. Ce pont est un \emph{pattern} courant en IoT industriel : il permet de conserver un protocole léger côté capteurs tout en bénéficiant de la robustesse de Kafka côté infrastructure.
+
+\subsubsection{Kafka -- Backpressure et Résilience}
+
+Kafka est la pièce centrale de la résilience. Son rôle dépasse la simple file d'attente :
+
+\begin{itemize}
+    \item \textbf{Buffer de backpressure} : si Spark est momentanément submergé (pic de données, GC long, maintenance), Kafka accumule les messages sans les perdre. Spark rattrape son retard au redémarrage via le paramètre \texttt{startingOffsets = "earliest"}.
+    \item \textbf{Rejeu (replay)} : en cas de bug dans le code Spark, on peut corriger et rejouer l'historique complet depuis Kafka, sans avoir à regénérer les données capteurs.
+    \item \textbf{Découplage} : le producteur (simulateur) et le consommateur (Spark) n'ont pas besoin d'être synchronisés. Ils peuvent être mis à jour indépendamment.
+\end{itemize}
+
+\subsubsection{Spark Structured Streaming}
+
+Spark lit le topic Kafka en continu et exécute \textbf{trois traitements parallèles} sur le même flux \texttt{filtrees} :
+
+\begin{enumerate}
+    \item \textbf{Filtrage} : élimination des valeurs aberrantes (température $\notin [30, 150]$, vibration $\notin [0, 5]$), écriture dans \texttt{mesures\_filtrees}.
+    \item \textbf{KPI} : moyennes glissantes sur 1 minute, écriture dans \texttt{kpi\_indicateurs}.
+    \item \textbf{Inférence ML} : application du modèle RandomForest avec construction de features temporelles (lags, pentes), écriture dans \texttt{alertes\_predictions}.
+\end{enumerate}
+
+Le trigger est configuré à 2~secondes. Chaque micro-batch contient $\sim$4 messages (2 temp + 2 vib), ce qui permet de calculer des lags valides sur la deuxième ligne de chaque capteur.
+
+\subsubsection{TimescaleDB}
+
+Base de données spécialisée pour les séries temporelles. Les tables sont des \emph{hypertables} qui partitionnent automatiquement les données par intervalle de temps. L'index \texttt{btree ("timestamp" DESC)} optimise la requête la plus fréquente : \og derniers enregistrements \fg.
+
+\subsubsection{MinIO}
+
+Stockage objet compatible S3. Utilisé pour :
+\begin{itemize}
+    \item Le dataset d'entraînement labellisé : \texttt{raffinerie-raw/training\_data/training\_data.json}
+    \item L'archivage (non actif actuellement) des données brutes du flux temps réel.
+\end{itemize}
+
+\subsubsection{Grafana}
+
+Dashboards avec datasource PostgreSQL direct (pas de couche intermédiaire). Chaque panel exécute une requête SQL vers TimescaleDB. Auto-refresh à 5~secondes.
+
+\newpage
+
+% ============================================================
+% SECTION 2 : LOGIQUE PHYSIQUE (AXE 1)
+% ============================================================
+\section{Logique Physique de la Simulation (Axe 1)}
+
+\subsection{Modèle de Lissage Exponentiel}
+
+Le simulateur utilise un modèle à inertie pour chaque capteur. La valeur $V_t$ à l'instant $t$ est une moyenne pondérée entre la valeur précédente $V_{t-1}$ et une cible $C$, avec un bruit $\varepsilon$ :
+
+\[
+\boxed{V_t = V_{t-1} \times (1 - \alpha) + C \times \alpha + \varepsilon}
+\]
+
+Où :
+\begin{itemize}
+    \item $\alpha \in [0, 1]$ : coefficient d'inertie. Plus $\alpha$ est grand, plus le capteur converge rapidement vers la cible.
+    \item $\varepsilon \sim \mathcal{U}(-\delta, +\delta)$ : bruit blanc uniforme simulant les micro-oscillations du capteur.
+\end{itemize}
+
+\subsection{Interprétation Physique de $\alpha$}
+
+\begin{center}
+\begin{tabular}{|c|c|c|c|}
+\hline
+\textbf{Capteur} & $\alpha$ & $\delta$ (bruit) & \textbf{Temps de convergence} \\
+\hline
+Température (pipe-101) & 0.05 & 0.2 & $\sim$20 itérations (40~s) \\
+Vibration (pump-303) & 0.20 & 0.05 & $\sim$5 itérations (10~s) \\
+\hline
+\end{tabular}
+\end{center}
+
+\textbf{Impact visuel :}
+\begin{itemize}
+    \item $\alpha = 0.05$ (température) produit une courbe lisse, qui met du temps à atteindre une nouvelle consigne. Visuellement, la température \og flotte \fg{} progressivement vers 145\textdegree C, sans à-coup.
+    \item $\alpha = 0.2$ (vibration) converge en $\sim$5 pas. La vibration réagit plus vite car l'inertie mécanique est moindre que l'inertie thermique.
+\end{itemize}
+
+\subsection{Pourquoi ce modèle est pertinent pour l'IA}
+
+Ce modèle, malgré sa simplicité, produit des données avec trois propriétés essentielles pour l'apprentissage :
+
+\begin{enumerate}
+    \item \textbf{Temporalité réelle} : la valeur à $t$ dépend de $t-1$, créant une dépendance temporelle que le modèle ML peut apprendre.
+    \item \textbf{Anomalies progressives} : une panne n'est pas un saut instantané mais une dérive. Le modèle ML doit détecter la \emph{pente} avant le dépassement de seuil.
+    \item \textbf{Bruit réaliste} : les micro-oscillations évitent le sur-apprentissage (le modèle ne peut pas mémoriser les valeurs exactes).
+\end{enumerate}
+
+\subsection{Scénarios Stochastiques}
+
+Toutes les 30--60 itérations, le scénario change selon une loi discrète :
+
+\[
+P(\text{scénario}) =
+\begin{cases}
+0,90 & \text{NORMAL} : C_{\text{temp}} = 95,0 ; C_{\text{vib}} = 1,2 \\
+0,05 & \text{SURCHAUFFE} : C_{\text{temp}} = 145,0 ; C_{\text{vib}} = 1,2 \\
+0,05 & \text{USURE} : C_{\text{temp}} = 95,0 ; C_{\text{vib}} = 4,5
+\end{cases}
+\]
+
+Les anomalies sont \textbf{mono-capteur} : en SURCHAUFFE seule la température dérive, en USURE seules les vibrations augmentent. Le modèle est ainsi forcé d'apprendre les deux types indépendamment.
+
+\newpage
+
+% ============================================================
+% SECTION 3 : STRATEGIE ML (AXE 2)
+% ============================================================
+\section{Stratégie de Machine Learning (Axe 2)}
+
+\subsection{Tabularisation d'une Série Temporelle}
+
+Le problème consiste à détecter une anomalie sur un flux continu de mesures. L'approche retenue est la \textbf{tabularisation} : on transforme chaque point $(V_t)$ en un vecteur de features qui encode son contexte temporel, ramenant le problème de séquence à un problème de classification supervisée classique.
+
+\[
+\text{série temporelle} : [V_{t-5}, V_{t-4}, V_{t-3}, V_{t-2}, V_{t-1}, V_t]
+\]
+\[
+\downarrow \text{tabularisation}
+\]
+\[
+\text{vecteur} : [V_t, V_{t-1}, V_{t-2}, V_{t-3}, V_{t-4}, V_{t-5}, (V_t - V_{t-1}), (V_t - V_{t-3})/3, \text{type\_capteur}]
+\]
+
+\subsection{Construction des Features}
+
+\subsubsection{Lags temporels ($t-1$ à $t-5$)}
+
+Les lags donnent au modèle une mémoire de la dynamique récente. Avec 5 lags et un intervalle de 2~secondes, la fenêtre est de 10~secondes. Cela permet au modèle de distinguer un \emph{trend} d'une oscillation transitoire.
+
+Exemple : si $V_t = 1,5$ avec $V_{t-1} = 1,2$ et $V_{t-2} = 1,2$, le modèle voit une pente. Si $V_{t-1}=1,5$ et $V_{t-2}=1,5$, il voit un palier.
+
+\subsubsection{Pente (slope) -- signal précurseur}
+
+Les deux pentes sont les features les plus importantes :
+
+\[
+\text{slope\_1} = V_t - V_{t-1} \quad ; \quad \text{slope\_3} = \frac{V_t - V_{t-3}}{3}
+\]
+
+\textbf{Pourquoi la pente est le signal précurseur :} une panne commence par une dérive progressive. Avant que le seuil critique ne soit atteint, la pente passe de $\sim0$ à positive (ou négative). Le modèle peut ainsi alerter dès les premières secondes de la dérive, bien avant qu'un seuil fixe ne se déclenche. 
+
+Dans notre système, le gain mesuré est de l'ordre de 6 à 8~secondes d'anticipation par rapport à un seuil sur la valeur absolue.
+
+\subsection{Labeling et Look-ahead}
+
+\subsubsection{Stratégie de label retenue}
+
+Pour ce projet, la simplicité a été privilégiée : le label est 1 si le scénario courant est anormal, 0 sinon. Il n'y a pas de look-ahead explicite car le changement de scénario est aléatoire (dé), donc impossible à prédire avant qu'il ne commence.
+
+\subsubsection{Discussion : et si on voulait un vrai look-ahead ?}
+
+Une approche plus sophistiquée consisterait à labelliser positivement les $N$ échantillons \textbf{avant} le début de l'anomalie (anticipation de 10--15~secondes). Cela forcerait le modèle à apprendre des \emph{précurseurs} plutôt que des \emph{marqueurs}. 
+
+\[
+\text{label}(t) = \mathbb{1}\{\text{anomalie à } t + k\}, \quad k = 5 \text{ à } 7 \text{ pas (10--15s)}
+\]
+
+Dans notre cas, cette approche n'a pas été retenue car le passage en anomalie est stochastique sans précurseur physique en amont. Mais pour des données réelles avec des signaux faibles annonciateurs (micro-vibrations, échauffements légers), le look-ahead est la bonne pratique.
+
+\subsection{Choix du Modèle : RandomForest face à LSTM}
+
+\subsubsection{RandomForest (retenu)}
+
+\begin{itemize}
+    \item \textbf{Avantages :} implémenté nativement dans Spark MLlib (pas de dépendance externe), inférence en quelques ms/ligne, robuste au déséquilibre de classe (91\%/9\%), interprétable (importance des features), passage à l'échelle horizontal via Spark.
+    \item \textbf{Inconvénients :} ne capture pas les dépendances temporelles longues au-delà de la fenêtre de lags (ici 10~s). 
+\end{itemize}
+
+\subsubsection{LSTM (non retenu)}
+
+\begin{itemize}
+    \item \textbf{Avantages :} capture naturellement les dépendances temporelles longues, peut apprendre des motifs complexes sans feature engineering manuel.
+    \item \textbf{Inconvénients :} nécessite TensorFlow/Keras/PyTorch (déploiement séparé de Spark), inférence plus lourde, GPU recommandé pour l'entraînement, surdimensionné pour 9 features sur une fenêtre de 10~s.
+\end{itemize}
+
+\subsubsection{Arbitrage}
+
+Pour ce cas d'usage (9 features numériques, fenêtre de 10~s, ~10k échantillons, contrainte de latence < 1~s), le RandomForest est le meilleur compromis. Le LSTM n'apporterait un gain qu'avec des séquences longues (minutes/heures) et des motifs temporels complexes.
+
+\subsection{Métriques et Performance}
+
+Le modèle final (30 arbres, depth 6) atteint une AUC de 0.8027 sur le jeu de test (20\%). 
+
+\[
+\text{AUC} = \int_{0}^{1} \text{TPR}(\text{FPR}^{-1}(x)) \, dx
+\]
+
+Un AUC de 0.80 signifie qu'il y a 80\% de chances que le modèle classe correctement une paire (normal, anomalie) prise au hasard. C'est un score satisfaisant pour un premier entraînement sans optimisation d'hyperparamètres.
+
+\textbf{Axes d'amélioration :}
+\begin{itemize}
+    \item Augmenter \texttt{numTrees} à 100+ (réduction de la variance).
+    \item Grid search sur \texttt{maxDepth} (5--15).
+    \item SMOTE pour renforcer la classe minoritaire (8,6\%).
+    \item Ajouter des features fréquentielles (FFT) si le bruit capteur a une signature exploitable.
+\end{itemize}
+
+\newpage
+
+% ============================================================
+% SECTION 4 : STREAMING & POST-TRAITEMENT
+% ============================================================
+\section{Streaming et Post-traitement}
+
+\subsection{Calcul des Features sur Micro-batches}
+
+Dans Spark Structured Streaming, le flux est découpé en micro-batches. Chaque batch contient les messages accumulés pendant l'intervalle de trigger (2~secondes). Les features sont calculées \textbf{dans la fonction \texttt{foreachBatch}} :
+
+\begin{lstlisting}[language=Python,caption={Construction des lags et pentes dans le foreachBatch}]
+window_spec = Window.partitionBy("machine_id", "type_capteur").orderBy("timestamp")
+
+pred_df = batch_df
+    .withColumn("v_lag1", lag("valeur", 1).over(window_spec))
+    .withColumn("v_lag2", lag("valeur", 2).over(window_spec))
+    # ... lags 3 a 5
+    .withColumn("slope_1", col("valeur") - col("v_lag1"))
+    .withColumn("slope_3", (col("valeur") - col("v_lag3")) / 3)
+\end{lstlisting}
+
+\subsection{Gestion des Lags Nuls}
+
+Le problème : la première ligne de chaque capteur dans un micro-batch a des lags nuls (pas de ligne précédente dans la partition). Initialement, \texttt{dropna()} supprimait ces lignes, rendant le modèle silencieux pendant plusieurs secondes.
+
+\textbf{Solution :} remplacer les lags nuls par la valeur courante via \texttt{coalesce} :
+
+\[
+\texttt{coalesce(col("v\_lag\_k"), col("valeur"))}
+\]
+
+Ainsi, la première ligne a une pente nulle (pas de changement), ce qui est une approximation correcte. La deuxième ligne du batch a déjà un lag valide.
+
+\subsection{Persistance M parmi N : filtrage des faux positifs}
+
+Un capteur réel peut produire des artefacts temporaires (pic de bruit, parasite électromagnétique). Une alerte déclenchée sur un seul point aberrant est un faux positif, indésirable en milieu industriel.
+
+La méthode \textbf{M-of-N} consiste à exiger qu'au moins $M$ prédictions parmi les $N$ dernières dépassent le seuil avant de déclencher une alarme :
+
+\[
+\text{alarme} = \mathbb{1}\left\{\sum_{i=0}^{N-1} \mathbb{1}\{score_{t-i} > 0,7\} \geq M\right\}
+\]
+
+Application concrète :
+\begin{itemize}
+    \item $N = 5$, $M = 3$ : on attend 3 dépassements du seuil dans les 5 dernières prédictions (soit 10~secondes).
+    \item Avantage : élimine les faux positifs isolés.
+    \item Inconvénient : retarde l'alerte de $M \times \text{intervalle}$ (ici $\sim$6~s).
+\end{itemize}
+
+Dans notre implémentation actuelle, la colonne \texttt{alerte\_detectee} est calculée dans l'écriture PostgreSQL mais pourrait être remplacée par une fenêtre glissante côté Grafana (alerte conditionnelle) ou côté Spark avec une UDAF (User Defined Aggregate Function).
+
+\newpage
+
+% ============================================================
+% SECTION 5 : SIMULATION D'ENTRETIEN
+% ============================================================
+\section{Simulation d'Entretien Technique}
+
+\subsection{Question 1 : Scalabilité}
+
+\textbf{Question :} \textit{Si demain on ajoute 1000 machines au lieu de 2, comment évolue votre architecture ?}
+
+\textbf{Réponse attendue (niveau Senior) :}
+
+L'architecture actuelle est conçue pour monter en charge horizontalement, mais avec des ajustements à chaque couche :
+
+\begin{enumerate}
+    \item \textbf{MQTT} : Mosquitto seul ne passe pas à l'échelle au-delà de quelques milliers de clients. Il faudrait un cluster EMQX, VerneMQ, ou un broker MQTT distribué avec sharding par topic.
+    \item \textbf{Kafka} : la solution la plus robuste. On augmente le nombre de partitions du topic \texttt{sensor-data} (ex: 12 partitions pour 1000 machines). Chaque machine écrit sur une partition dédiée (basée sur \texttt{machine\_id} hash). Spark lit en parallèle avec autant de consumers que de partitions.
+    \item \textbf{Spark} : on ajoute des workers. Le nombre de workers doit être au moins égal au nombre de partitions Kafka pour une parallélisation optimale. La mémoire de chaque worker (1~Go actuellement) serait à augmenter à 4--8~Go pour 1000 machines.
+    \item \textbf{TimescaleDB} : l'hypertable partitionne déjà par temps. On peut ajouter un sharding spatial par groupe de machines (ex: une base par atelier) avec des vues fédérées.
+    \item \textbf{Grafana} : le goulot d'étranglement devient les requêtes SQL. On déploie un cache Redis ou on utilise Grafana en mode \emph{query caching}. On limite la résolution temporelle dans les dashboards (downsampling automatique).
+\end{enumerate}
+
+Le vrai bottleneck aujourd'hui est le simulateur monothread, pas l'infrastructure.
+
+\subsection{Question 2 : Tolérance aux Pannes}
+
+\textbf{Question :} \textit{Que se passe-t-il si Spark crashe ? Et si Kafka crashe ?}
+
+\textbf{Réponse :}
+
+\begin{itemize}
+    \item \textbf{Kafka crashe} : le simulateur continue d'envoyer sur MQTT. Le pont \texttt{mqtt\_to\_kafka.py} accumule les messages en mémoire tampon ou les perd (selon la configuration QoS de MQTT). À la reprise de Kafka, le pont reprend la transmission. \textbf{Solution idéale :} configurer MQTT avec QoS 1 (au moins une fois) et activer la persistance Mosquitto. Le pont MQTT doit aussi bufferiser sur disque en cas d'indisponibilité prolongée de Kafka.
+
+    \item \textbf{Spark crashe} : les messages s'accumulent dans Kafka (persistance disque). Au redémarrage, Spark lit depuis le dernier offset commité (grâce aux checkpoints Kafka stockés dans \texttt{/tmp/checkpoint\_*}). \textbf{Problème actuel :} les checkpoints sont sur le volume local du conteneur master, volatils. En production, ils seraient sur HDFS ou S3.
+
+    \item \textbf{TimescaleDB crashe} : Spark écrit en mode \texttt{append} et gère l'erreur en réessayant. Pendant l'indisponibilité, les données s'accumulent dans Kafka et les checkpoints Spark, garantissant zéro perte.
+\end{itemize}
+
+\subsection{Question 3 : Dérive du Modèle (Model Drift)}
+
+\textbf{Question :} \textit{Comment gérez-vous le fait que votre modèle s'entraîne sur des données simulées et sera appliqué à des données réelles ? Le modèle ne va-t-il pas dériver avec le temps ?}
+
+\textbf{Réponse :}
+
+C'est un problème classique dit de \og concept drift \fg. Plusieurs axes de réponse :
+
+\begin{enumerate}
+    \item \textbf{Détection passive} : on surveille la distribution du score d'anomalie. Si en régime normal le score moyen passe de 0.03 à 0.15, c'est le signe que la distribution des données d'entrée a changé (covariate shift). On peut alerter l'opérateur.
+
+    \item \textbf{Retraining automatisé} : on stocke les données filtrées des 7 derniers jours dans MinIO. Chaque nuit, un job Spark ré-entraîne le modèle sur les données réelles labellisées automatiquement (par feedback implicite : toute période sans intervention humaine est labellisée \og normale \fg{}) ou semi-automatiquement (label manuel par l'expert).
+
+    \item \textbf{Architecture de retraining sans couture} : comme le pipeline d'entraînement (\texttt{train\_model.py}) et d'inférence (\texttt{traitement\_kpi.py}) utilisent le même format de features et le même \texttt{PipelineModel}, on peut simplement écraser le fichier du modèle et redémarrer Spark.
+
+    \item \textbf{Limite de l'approche actuelle} : le modèle actuel n'a jamais vu de données réelles. La simulation, bien que réaliste, ne capture pas la \emph{vraie} dynamique d'une usine. En production, il faudrait une phase de calibrage avec des données réelles historiques.
+\end{enumerate}
+
+\subsection{Question 4 : Pourquoi Spark Streaming plutôt que Flink ?}
+
+\textbf{Question :} \textit{Vous avez choisi Spark Streaming pour l'inférence. Pourquoi pas Apache Flink ?}
+
+\textbf{Réponse :}
+
+Spark Structured Streaming a été choisi pour plusieurs raisons, mais le choix n'est pas unanime :
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{|X|X|}
+\hline
+\textbf{Spark Streaming} & \textbf{Apache Flink} \\
+\hline
+Micro-batch (latence $\sim$2~s) & \emph{Vrai} streaming (latence ms) \\
+Écosystème MLlib intégré & Pas de MLlib natif \\
+Communauté large, documentation abondante & Communauté plus restreinte \\
+Plus simple à déployer (standalone cluster) & Nécessite un cluster dédié \\
+Paradigme DataFrame facile à prendre en main & API DataStream plus complexe \\
+\hline
+\end{tabularx}
+\end{center}
+
+\textbf{Notre cas :} la latence requise est de l'ordre de la seconde (trigger 2~s), pas de la milliseconde. L'intégration native avec MLlib est un avantage décisif : l'entraînement et l'inférence se font dans le même framework. Flink nécessiterait de déployer un service ML séparé (TensorFlow Serving, PyTorch Serve), complexifiant l'architecture.
+
+Si la latence devait descendre à 100~ms, Flink deviendrait le bon choix.
+
+\subsection{Question 5 : Coût et Optimisation}
+
+\textbf{Question :} \textit{Votre pipeline tourne sur un seul nœud en dev. Quel est le coût estimé en production ? Qu'optimiseriez-vous ?}
+
+\textbf{Réponse :}
+
+Estimation pour 100 machines, données toutes les 2~secondes :
+
+\begin{itemize}
+    \item \textbf{Kafka} : 3 brokers (t3.medium, \$\$50/mois chacun) = \$\$150/mois.
+    \item \textbf{Spark} : 1 master + 4 workers (t3.large, \$\$70/mois chacun) = \$\$350/mois.
+    \item \textbf{TimescaleDB} : 1 instance (r5.large, 200~Go SSD) = \$\$200/mois.
+    \item \textbf{Grafana + Pont MQTT + MinIO} : 1 instance t3.medium = \$\$50/mois.
+    \item \textbf{Total} : $\sim$\$\$750/mois pour l'infrastructure cloud.
+\end{itemize}
+
+\textbf{Optimisations possibles :}
+\begin{enumerate}
+    \item \textbf{Downsampling} : stocker les données brutes 7 jours dans TimescaleDB, puis les agréger en moyennes 1-minute dans des tables séparées au-delà.
+    \item \textbf{Compression} : TimescaleDB avec compression native réduit l'espace disque de 90\% sur les données plus anciennes que 24~h.
+    \item \textbf{Spot instances} : les workers Spark peuvent tourner sur des instances spot (préemptibles), avec des checkpoints réguliers pour résister aux interruptions.
+    \item \textbf{Kafka tiering} : déplacer les messages Kafka de plus de 24~h vers un stockage objet (MinIO ou S3) via Kafka tiered storage.
+\end{enumerate}
+
+\newpage
+
+% ============================================================
+% SECTION 6 : INTERPRETATION GRAPHIQUE
+% ============================================================
+\section{Interprétation Graphique du Dashboard Grafana}
+
+\subsection{Configuration des Panels}
+
+Quatre panels composent le dashboard \og Surveillance Raffinerie \fg{} :
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{|c|X|X|}
+\hline
+\textbf{Panel} & \textbf{Source SQL} & \textbf{Rendu} \\
+\hline
+Température & \texttt{mesures\_filtrees WHERE type\_capteur = 'temperature'} & Time series, une courbe par machine \\
+Vibrations & \texttt{mesures\_filtrees WHERE type\_capteur = 'vibration'} & Time series, une courbe par machine \\
+Score Anomalie & \texttt{alertes\_predictions} (tous types) & Time series avec seuil horizontal rouge à 0.7 \\
+Risque Anomalie & \texttt{SELECT score\_anomalie ... LIMIT 1} & Jauge (0 à 1) avec seuils vert/jaune/rouge \\
+\hline
+\end{tabularx}
+\end{center}
+
+\subsection{Comportement en Détection Prédictive}
+
+\subsubsection{Scénario normal}
+
+\begin{itemize}
+    \item Température stable $\approx$ 95\textdegree C (oscillations $\pm 0,2$\textdegree C).
+    \item Vibration stable $\approx$ 1,2~mm/s (oscillations $\pm 0,05$~mm/s).
+    \item Score d'anomalie : 0.02--0.06 (jauge verte, barre à $\sim$3\%).
+    \item La courbe Alertes Prédictives oscille entre 0.02 et 0.06, sans franchir le seuil rouge.
+\end{itemize}
+
+\subsubsection{Début d'anomalie (SURCHAUFFE ou USURE)}
+
+\textbf{Phase 1 -- Dérive (secondes 0 à 8) :}
+\begin{itemize}
+    \item La température monte de 95 $\rightarrow$ 100\textdegree C (ou la vibration de 1,2 $\rightarrow$ 1,6~mm/s).
+    \item Visuellement, la courbe correspondante change de pente (passe de plat à montant).
+    \item Le score d'anomalie quitte la bande 0.02--0.06 et commence à monter (0.1, 0.2, 0.3).
+    \item La jauge passe du vert au jaune (entre 0.4 et 0.7).
+\end{itemize}
+
+\textbf{Phase 2 -- Alerte (après $\sim$10~secondes) :}
+\begin{itemize}
+    \item Le score dépasse 0.7.
+    \item La courbe Alertes Prédictives franchit le seuil rouge horizontal.
+    \item La jauge passe en zone rouge (valeur $>$ 0.7).
+    \item L'opérateur voit la corrélation : la courbe de température monte, le score d'anomalie suit avec un léger décalage.
+\end{itemize}
+
+\textbf{Phase 3 -- Stabilisation (après $\sim$30 secondes) :}
+\begin{itemize}
+    \item La température atteint son palier anormal (145\textdegree C ou 4,5~mm/s).
+    \item La pente redevient nulle (le capteur oscille autour de la nouvelle cible).
+    \item Le score d'anomalie \textbf{redescend progressivement} vers 0.3--0.5 car la pente (slope\_1) repasse à $\sim$0. \textit{Ce comportement est normal et attendu : le modèle détecte la dérive, pas l'état stabilisé anormal.}
+\end{itemize}
+
+\subsection{Indicateurs d'Alerte pour l'Opérateur}
+
+Ce que l'opérateur voit et comment il doit interpréter :
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{|X|X|X|}
+\hline
+\textbf{Indicateur} & \textbf{Ce qu'il montre} & \textbf{Décision} \\
+\hline
+Jauge verte $<$ 0.4 & Régime normal & Aucune action \\
+Jauge jaune [0.4, 0.7[ & Dérive détectée, capteur en changement & Surveillance renforcée, vérifier la salle de contrôle \\
+Jauge rouge $\geq$ 0.7 & Anomalie confirmée & Intervention requise (inspection, maintenance) \\
+Score $>$ 0.7 mais jauge redescend & Dérive terminée, palier anormal atteint & Maintenance planifiée (pas d'urgence immédiate) \\
+Score stable $>$ 0.7 & Anomalie persistante & Intervention immédiate \\
+\hline
+\end{tabularx}
+\end{center}
+
+\subsection{Interprétation du Plateau à 0.7}
+
+Comme expliqué dans la section ML, le score plafonne à 0.7 (21~arbres sur 30 votent anomalie) dans la plupart des cas. Ce n'est pas un problème mais le comportement normal du vote majoritaire. L'opérateur doit comprendre que :
+
+\begin{itemize}
+    \item \textbf{0.7} = alerte fiable, majorité d'arbres confiants.
+    \item \textbf{0.9+} = consensus presque total, extrêmement rare.
+    \item La différence entre 0.7 et 0.8 n'a pas d'impact opérationnel.
+\end{itemize}
+
+\newpage
+
+% ============================================================
+% ANNEXE
+% ============================================================
+\section*{Annexe : Fiche récapitulative}
+\addcontentsline{toc}{section}{Annexe : Fiche récapitulative}
+
+\subsection*{Emplacement des artefacts}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{|l|X|}
+\hline
+\textbf{Artefact} & \textbf{Emplacement} \\
+\hline
+Dataset d'entraînement (10k lignes) & MinIO : \texttt{raffinerie-raw/training\_data/training\_data.json} \\
+Modèle ML (3 stages, 30 arbres) & \texttt{/home/spark/.ivy2/predictive\_model/} \\
+Mesures filtrées & TimescaleDB : \texttt{mesures\_filtrees} ($\sim$200k lignes) \\
+KPI (moyennes 1 min) & TimescaleDB : \texttt{kpi\_indicateurs} ($\sim$6k lignes) \\
+Prédictions ML & TimescaleDB : \texttt{alertes\_predictions} ($\sim$72k lignes) \\
+Dashboard Grafana & UID : \texttt{c295507b-cccd-46e7-9510-8c57cf1a81d4} \\
+\hline
+\end{tabularx}
+\end{center}
+
+\subsection*{Commandes utiles}
+
+\begin{lstlisting}[language=bash,caption={Redémarrage de la pipeline}]
+# Lancer le simulateur + pont MQTT
+cd raffinerie-iot
+nohup python3 simulateur_capteurs.py &
+nohup python3 mqtt_to_kafka.py &
+
+# Lancer le traitement Spark
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --conf spark.executorEnv.PYTHONPATH=/home/spark/.ivy2/packages \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,\\
+             org.postgresql:postgresql:42.7.1 \
+  /app/traitement_kpi.py
+
+# Lancer l'entrainement
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --packages org.apache.hadoop:hadoop-aws:3.3.4 \
+  /app/train_model.py
+\end{lstlisting}
+
+\subsection*{Paramètres du modèle}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{|l|X|}
+\hline
+\textbf{Paramètre} & \textbf{Valeur} \\
+\hline
+Algorithme & RandomForestClassifier (Spark MLlib) \\
+Arbres & 30 \\
+Profondeur max & 6 \\
+Seed & 42 \\
+Features & 9 (valeur + 5 lags + 2 slopes + type\_capteur) \\
+Classes & 2 (normal, anomalie) \\
+AUC (test) & 0.8027 \\
+Split train/test & 80\% / 20\% \\
+Seuil d'alerte & 0.7 (configurable dans \texttt{traitement\_kpi.py}) \\
+Intervalle d'inférence & 2~secondes (trigger Spark) \\
+\hline
+\end{tabularx}
+\end{center}
+
+\end{document}

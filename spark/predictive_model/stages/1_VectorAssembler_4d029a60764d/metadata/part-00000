@@ -1,0 +1,1 @@
+{"class":"org.apache.spark.ml.feature.VectorAssembler","timestamp":1779130250893,"sparkVersion":"3.4.1","uid":"VectorAssembler_4d029a60764d","paramMap":{"inputCols":["valeur","v_lag1","v_lag2","v_lag3","v_lag4","v_lag5","slope_1","slope_3","sensor_idx"],"outputCol":"features"},"defaultParamMap":{"handleInvalid":"error","outputCol":"VectorAssembler_4d029a60764d__output"}}

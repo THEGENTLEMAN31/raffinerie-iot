@@ -1,0 +1,1 @@
+{"class":"org.apache.spark.ml.feature.StringIndexerModel","timestamp":1779130249528,"sparkVersion":"3.4.1","uid":"StringIndexer_9ffcbd801429","paramMap":{"inputCol":"type_capteur","outputCol":"sensor_idx"},"defaultParamMap":{"stringOrderType":"frequencyDesc","handleInvalid":"error","outputCol":"StringIndexer_9ffcbd801429__output"}}

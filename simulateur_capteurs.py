@@ -37,9 +37,11 @@ while True:
         elif dice < 0.95:
             current_scenario = "SURCHAUFFE"
             TARGET_TEMP = 145.0  # Proche de la limite Spark (150)
+            TARGET_VIB = 1.2
         else:
             current_scenario = "USURE_MECANIQUE"
             TARGET_VIB = 4.5    # Proche de la limite Spark (5)
+            TARGET_TEMP = 95.0
         scenario_timer = random.randint(30, 60)
     
     scenario_timer -= 1
