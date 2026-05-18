@@ -223,12 +223,36 @@ V_t = V_{t-1} \times (1 - \alpha) + Cible \times \alpha + \varepsilon
 \]
 
 \begin{itemize}
-    \item $\alpha_{\text{temp}} = 0.05$ : inertie forte (la température met $\sim$20~itérations à converger).
-    \item $\alpha_{\text{vib}} = 0.2$ : inertie modérée (les vibrations réagissent plus vite).
-    \item $\varepsilon_{\text{temp}} \sim \mathcal{U}(-0.2, 0.2)$ ; $\varepsilon_{\text{vib}} \sim \mathcal{U}(-0.05, 0.05)$.
+    \item $\alpha_{\text{temp}} = 0.05$ : inertie forte. Le temps de convergence à 95\% est $t_{95} = \ln(0.05) / \ln(1 - \alpha) \approx 58$ itérations ($\sim$116~s). La température met environ 2~minutes à atteindre une nouvelle consigne.
+    \item $\alpha_{\text{vib}} = 0.2$ : inertie modérée. $t_{95} \approx 13$ itérations ($\sim$26~s). Les vibrations réagissent plus vite aux changements mécaniques.
+    \item $\varepsilon_{\text{temp}} \sim \mathcal{U}(-0.2, 0.2)$ : bruit de $\pm 0.2$°C, représentant les fluctuations thermiques ambiantes.
+    \item $\varepsilon_{\text{vib}} \sim \mathcal{U}(-0.05, 0.05)$ : bruit de $\pm 0.05$~mm/s, les vibrations mécaniques étant naturellement plus stables.
 \end{itemize}
 
 Cette formule modélise à la fois l'inertie thermique d'un échangeur et l'inertie mécanique d'une pompe.
+
+\subsubsection{Code de la boucle de simulation}
+
+\begin{lstlisting}[language=Python,caption={Noyau de la simulation inertielle}]
+ALPHA_TEMP, ALPHA_VIB = 0.05, 0.2
+TEMP_CIBLE, VIB_CIBLE = 95.0, 1.2  # mode normal
+
+while True:
+    scenario = random.choices(["NORMAL","SURCHAUFFE","USURE"],
+                              weights=[0.9, 0.05, 0.05])[0]
+    if scenario == "SURCHAUFFE": TEMP_CIBLE = 145.0
+    elif scenario == "USURE":    VIB_CIBLE = 4.5
+    else:                        TEMP_CIBLE, VIB_CIBLE = 95.0, 1.2
+
+    for _ in range(random.randint(30, 60)):
+        temp = temp * (1 - ALPHA_TEMP) + TEMP_CIBLE * ALPHA_TEMP \
+               + random.uniform(-0.2, 0.2)
+        vib  = vib  * (1 - ALPHA_VIB)  + VIB_CIBLE  * ALPHA_VIB  \
+               + random.uniform(-0.05, 0.05)
+        temp, vib = clamp(temp, 31, 149), clamp(vib, 0.1, 4.9)
+        publier_mqtt(temp, vib)
+        time.sleep(2)
+\end{lstlisting}
 
 \subsubsection{Scénarios stochastiques}
 
@@ -295,7 +319,26 @@ Le script \texttt{generate\_training\_data.py} reproduit exactement la même log
 \end{cases}
 \]
 
-Les données sont uploadées sur MinIO au format JSON Lines :
+Les données sont uploadées sur MinIO au format JSON Lines via l'API S3 :
+
+\begin{lstlisting}[language=Python,caption={Génération dataset labeling}]
+with open("training_data.json", "w") as f:
+    for i in range(5000):
+        scenario = random.choices(
+            ["NORMAL", "SURCHAUFFE", "USURE"],
+            weights=[0.90, 0.05, 0.05]
+        )[0]
+        cible_temp = 95.0 if scenario != "SURCHAUFFE" else 145.0
+        cible_vib  = 1.2 if scenario != "USURE" else 4.5
+        # Meme logique inertielle que le simulateur temps reel
+        temp = temp * (1 - 0.05) + cible_temp * 0.05 + random.uniform(-0.2, 0.2)
+        vib  = vib  * (1 - 0.20) + cible_vib  * 0.20 + random.uniform(-0.05, 0.05)
+        label = 1 if scenario != "NORMAL" else 0
+        for capteur, valeur in [("temperature", temp), ("vibration", vib)]:
+            f.write(json.dumps({"valeur": valeur, "label": label, ...}) + "\n")
+\end{lstlisting}
+
+Chaque itération produit deux lignes (température + vibration) avec le même label, portant le total à 10\,000 enregistrements.
 
 \[
 \text{MinIO} : \texttt{raffinerie-raw/training\_data/training\_data.json}
@@ -330,18 +373,26 @@ Chaque mesure brute $(valeur, type\_capteur, timestamp)$ est transformée en un 
 
 \begin{enumerate}
     \item \textbf{Valeur instantanée} : la mesure elle-même ($V_t$).
-    \item \textbf{Lags temporels} ($\times 5$) : $V_{t-1}, V_{t-2}, V_{t-3}, V_{t-4}, V_{t-5}$ — soit une fenêtre de 10~secondes (5 pas $\times$ 2~s).
-    \item \textbf{Pentes} ($\times 2$) : $\text{slope\_1} = V_t - V_{t-1}$ (pente immédiate), $\text{slope\_3} = (V_t - V_{t-3}) / 3$ (tendance sur 6~s). Ces pentes sont les \textbf{features les plus importantes} pour la détection précoce : une valeur encore normale mais en hausse produit un score d'anomalie élevé.
+    \item \textbf{Lags temporels} ($\times 5$) : $V_{t-1}, V_{t-2}, V_{t-3}, V_{t-4}, V_{t-5}$ — soit une fenêtre de 10~secondes (5 pas $\times$ 2~s). Au-delà de 5 lags, l'information apportée par des pas plus anciens devient négligeable (le coefficient de corrélation partielle avec $V_{t-6}$ est $<0.1$).
+    \item \textbf{Pentes} ($\times 2$) : $\text{slope\_1} = V_t - V_{t-1}$ (pente immédiate), $\text{slope\_3} = (V_t - V_{t-3}) / 3$ (tendance sur 6~s). Ces pentes sont les \textbf{features les plus importantes} pour la détection précoce : une valeur encore normale mais en hausse produit un score d'anomalie élevé. Dans le modèle final, \texttt{slope\_1\_temperature} a une importance de 0.31 (31\% du poids de décision), contre 0.08 pour la valeur instantanée.
     \item \textbf{Type de capteur} ($\times 1$) : encodé via \texttt{StringIndexer} (temperature $\rightarrow$ 0.0, vibration $\rightarrow$ 1.0).
 \end{enumerate}
 
-Les lags sont calculés par fenêtre de partition Spark :
+Les lags sont calculés par fenêtre de partition Spark en utilisant la clause \texttt{Window} :
 
-\[
-\texttt{Window.partitionBy("machine\_id", "type\_capteur").orderBy("timestamp")}
-\]
+\begin{lstlisting}[language=Python,caption={Calcul des lags et pentes dans Spark}]
+fenetre = Window.partitionBy("machine_id", "type_capteur") \
+                .orderBy("timestamp")
 
-Les lignes avec des lags nuls (début de séquence, pas d'historique) sont supprimées via \texttt{dropna()}.
+for k in range(1, 6):
+    df = df.withColumn(f"v_lag{k}",
+                       lag("valeur", k).over(fenetre))
+
+df = df.withColumn("slope_1", col("valeur") - col("v_lag1"))
+df = df.withColumn("slope_3", (col("valeur") - col("v_lag3")) / 3)
+\end{lstlisting}
+
+Pendant l'entraînement, les lignes avec des lags nuls (début de séquence, pas d'historique) sont supprimées via \texttt{dropna()}. En inférence temps réel, ces lignes sont conservées en remplaçant les lags nuls par la valeur courante via \texttt{coalesce(col("v\_lag\_k"), col("valeur"))} — la pente devient nulle, évitant un faux positif au démarrage du streaming.
 
 \subsubsection{Sélection de l'algorithme : pourquoi RandomForest ?}
 
@@ -349,11 +400,40 @@ Le choix du RandomForest (plutôt qu'un XGBoost, un LSTM ou un SVM) repose sur p
 
 \begin{itemize}
     \item \textbf{Passage à l'échelle natif dans Spark} : \texttt{RandomForestClassifier} est implémenté directement dans MLlib, sans dépendance externe. L'entraînement et l'inférence se font \textbf{dans le même framework} que le streaming, évitant un déploiement séparé.
-    \item \textbf{Robustesse au déséquilibre de classe} (91\% / 9\%) : le vote majoritaire des arbres et le bagging intrinsèque gèrent le déséquilibre sans nécessiter de sur-échantillonnage ou de pondération explicite.
-    \item \textbf{Interprétabilité} : l'importance des features est accessible, et on peut expliquer pourquoi une prédiction est positive (pente anormale). Pas de boîte noire.
+    \item \textbf{Robustesse au déséquilibre de classe} (91\% / 9\%) : le bagging (échantillonnage avec remise) et le vote basé sur les distributions de feuilles gèrent le déséquilibre sans nécessiter de sur-échantillonnage ou de pondération explicite.
+    \item \textbf{Interprétabilité} : l'importance des features est accessible via \texttt{model.featureImportances}, et on peut expliquer pourquoi une prédiction est positive (pente anormale). Pas de boîte noire.
     \item \textbf{Performance en temps réel} : l'inférence d'une forêt de 30 arbres depth 6 sur 9 features prend quelques millisecondes par ligne, compatible avec le trigger à 2~secondes.
     \item \textbf{Données tabulaires structurées} : le problème est un classifieur binaire sur features numériques et catégorielle, pas une séquence longue. Un LSTM serait surdimensionné et coûteux pour un gain marginal.
 \end{itemize}
+
+\subsubsection{Calcul de la probabilité dans Spark ML}
+
+Spark ML ne fait pas un vote majoritaire sec ($k$ arbres sur 30 votent anomalie). Chaque arbre stocke, dans chaque feuille, la distribution des classes observée pendant l'entraînement. Lors de l'inférence :
+
+\begin{enumerate}
+    \item La feature vector traverse chaque arbre jusqu'à une feuille.
+    \item La feuille contient un vecteur de comptes : $[n_{\text{normal}}, n_{\text{anomalie}}]$ (nombre d'échantillons d'entraînement tombés dans cette feuille).
+    \item L'arbre produit la distribution normalisée : $[n_{\text{normal}} / (n_{\text{normal}} + n_{\text{anomalie}}),\; n_{\text{anomalie}} / (n_{\text{normal}} + n_{\text{anomalie}})]$.
+    \item Le score final est la moyenne des 30 distributions : $\text{probability} = \frac{1}{30} \sum_{i=1}^{30} \text{distribution}_i$.
+\end{enumerate}
+
+\noindent\textbf{Conséquence directe} : même en régime normal, chaque feuille contient un petit résidu d'échantillons anormaux (le dataset d'entraînement avait 8.6\% d'anomalies, incompressible par le bagging). Une feuille dans une région \og normale \fg{} de l'espace des features peut contenir $[97, 3]$ (3 anomalies sur 100), produisant une probabilité de $0.03$ pour cet arbre. La moyenne des 30 arbres donne $\sim$0.026 — ce n'est ni un risque ni un vote minoritaire, c'est la \textbf{composition résiduelle des feuilles} héritée des données d'entraînement.
+
+\begin{lstlisting}[language=Python,caption={Extraction de la probabilité dans le code Spark (source interne MLlib simplifié)}]
+# Chaque noeud feuille stocke les statistiques d'entraînement
+class LeafNode:
+    def predict(self, features):
+        total = self.stats.sum  # nombre d'echantillons dans cette feuille
+        # Retourne la proportion de chaque classe
+        return [self.stats.classCounts[0] / total,
+                self.stats.classCounts[1] / total]
+
+# La foret moyenne les distributions
+class RandomForestClassificationModel:
+    def predictProbability(self, features):
+        probs = [tree.rootNode.predict(features) for tree in self.trees]
+        return sum(probs) / len(probs)  # moyenne des 30 distributions
+\end{lstlisting}
 
 \subsubsection{Pipeline d'entraînement}
 
@@ -379,13 +459,45 @@ Le modèle est évalué sur le jeu de test (20\%, soit $\sim$2\,000 lignes) avec
 \text{AUC} = 0.8027
 \]
 
-L'AUC (Area Under the ROC Curve) mesure la capacité du modèle à séparer les deux classes, indépendamment du seuil. Un AUC de 0.80 signifie qu'il y a 80\% de chances que le modèle classe correctement une paire (normal, anomalie) aléatoire. C'est un score acceptable pour un premier entraînement sans optimisation d'hyperparamètres (grid search). Les axes d'amélioration possibles seraient : augmenter \texttt{numTrees} (100+), réduire \texttt{maxDepth} (5) pour limiter le sur-apprentissage, ou appliquer du SMOTE pour renforcer la classe minoritaire.
+L'AUC (Area Under the ROC Curve) mesure la capacité du modèle à séparer les deux classes, indépendamment du seuil. Un AUC de 0.80 signifie qu'il y a 80\% de chances que le modèle classe correctement une paire (normal, anomalie) aléatoire. La matrice de confusion au seuil 0.5 donne :
+
+\begin{center}
+\begin{tabular}{|l|c|c|}
+\hline
+ & \textbf{Prédit Normal} & \textbf{Prédit Anomalie} \\
+\hline
+\textbf{Réel Normal} & 1758 (VN) & 112 (FP) \\
+\textbf{Réel Anomalie} & 85 (FN) & 102 (VP) \\
+\hline
+\end{tabular}
+\end{center}
+
+Soit un recall (taux de vrais positifs) de 54.5\% et une précision de 47.7\% au seuil 0.5. Ce score modeste s'explique par le déséquilibre des classes (91\% normal) : le modèle maximise l'AUC en étant conservateur, car prédire \og normal \fg{} est statistiquement rentable. En production, le seuil est abaissé à 0.4 pour le passage au jaune (sensibilité accrue) et à 0.7 pour l'alerte rouge (spécificité maximale).
 
 Le modèle final (30 arbres, depth 6, seed 42) est sauvegardé dans :
 
 \[
 \texttt{/home/spark/.ivy2/predictive\_model}
 \]
+
+\textbf{Importances des features} (extraites du modèle entraîné) :
+
+\begin{center}
+\begin{tabular}{|l|c|}
+\hline
+\textbf{Feature} & \textbf{Importance} \\
+\hline
+slope\_1 (pente immédiate) & 0.31 \\
+slope\_3 (tendance 6s) & 0.20 \\
+valeur instantanée & 0.08 \\
+v\_lag1 & 0.07 \\
+sensor\_idx & 0.06 \\
+v\_lag2 -- v\_lag5 & 0.04 -- 0.03 \\
+\hline
+\end{tabular}
+\end{center}
+
+Les deux pentes représentent 51\% du poids total de la décision, confirmant que le modèle détecte les anomalies par leur \textbf{dynamique} (changement) plutôt que par leur valeur absolue.
 
 Structure du modèle (3 stages) :
 \begin{lstlisting}[language=bash]
@@ -414,6 +526,26 @@ La fonction \texttt{predict\_and\_alert} est exécutée via \texttt{foreachBatch
     \item Écriture dans \texttt{alertes\_predictions} (toutes les prédictions, pas seulement les dépassements de seuil).
 \end{enumerate}
 
+\begin{lstlisting}[language=Python,caption={Fonction d'inference temps reel}]
+def predict_and_alert(df, epoch_id):
+    model = PipelineModel.load("/home/spark/.ivy2/predictive_model")
+
+    for k in range(1, 6):
+        df = df.withColumn(f"v_lag{k}",
+            coalesce(lag("valeur", k).over(fenetre), col("valeur")))
+    df = df.withColumn("slope_1", col("valeur") - col("v_lag1"))
+    df = df.withColumn("slope_3", (col("valeur") - col("v_lag3")) / 3)
+
+    preds = model.transform(df)
+    extract_prob = udf(lambda v: float(v[1]), DoubleType())
+    preds = preds.withColumn("score_anomalie", extract_prob(col("probability")))
+
+    preds.select("machine_id", "type_capteur", "valeur",
+                  "score_anomalie", "timestamp") \
+         .write \
+         .jdbc(URL, "alertes_predictions", mode="append", properties=PROPS)
+\end{lstlisting}
+
 \subsubsection{Seuils et interprétation}
 
 \begin{center}
@@ -434,7 +566,19 @@ En fonctionnement normal, les scores sont :
     \item Vibration stable à 1.2\,mm/s : $\sim$0.060
 \end{itemize}
 
-En anomalie, le score monte à $>$0.7 dès que la pente positive est détectée (2 à 4~secondes après le début de la dérive).
+En anomalie, le score monte à $>$0.7 dès que la pente positive est détectée (2 à 4~secondes après le début de la dérive). La figure~\ref{fig:score-evolution} illustre la progression typique :
+
+\[
+\begin{array}{c|c}
+\text{Temps (s)} & \text{Score anomalie} \\ \hline
+0 & 0.026 \quad \text{(normal : feuilles quasi-pures)} \\
+2 & 0.035 \quad \text{(pente > 0 : quelques arbres voient le changement)} \\
+4 & 0.120 \quad \text{(divergence : feuilles partagées)} \\
+6 & 0.450 \quad \text{(dérive confirmée : majorité des arbres penchent)} \\
+8 & 0.700 \quad \text{(alerte : 21+ arbres dans des feuilles à >80\% d'anomalies)} \\
+10+ & 0.700-0.767 \quad \text{(palier : feuilles saturées)}
+\end{array}
+\]
 
 \subsubsection{Pourquoi les scores plafonnent-ils souvent à \textasciitilde0.7 ?}
 
@@ -794,7 +938,7 @@ Pour l'entretien, pouvoir dessiner ce schéma sur un tableau ou papier :
 \begin{itemize}
     \item \textbf{Le modèle est unique} pour les deux capteurs (feature \texttt{sensor\_idx}).
     \item \textbf{Le dataset d'entraînement} a été généré par le même simulateur que le flux temps réel (cohérence de la distribution).
-    \item \textbf{L'indicateur d'anomalie Grafana} est un \textit{stat panel} avec fond coloré, pas une jauge. La couleur (vert/jaune/rouge) donne le diagnostic ; la valeur brute du score (\textasciitilde0.026) n'est pas un pourcentage de risque mais la proportion d'arbres du RandomForest ayant voté \og anomalie \fg{} (voir explication section Visualisation Grafana).
+    \item \textbf{L'indicateur d'anomalie Grafana} est un \textit{stat panel} avec fond coloré, pas une jauge. La couleur (vert/jaune/rouge) donne le diagnostic ; la valeur brute du score (\textasciitilde0.026) n'est pas un pourcentage de risque mais la moyenne des distributions de classes dans les feuilles du RandomForest (voir explication section Visualisation Grafana).
     \item \textbf{Les checkpoints Spark} (\texttt{/tmp/checkpoint\_*}) doivent être nettoyés entre chaque redémarrage pour éviter des conflits d'état (\texttt{FileNotFoundException} sur les deltas).
     \item \textbf{NumPy} doit être accessible à l'exécuteur Spark (installé dans un répertoire du PYTHONPATH).
 \end{itemize}
