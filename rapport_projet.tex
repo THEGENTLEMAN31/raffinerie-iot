@@ -438,18 +438,18 @@ En anomalie, le score monte à $>$0.7 dès que la pente positive est détectée 
 
 \subsubsection{Pourquoi les scores plafonnent-ils souvent à \textasciitilde0.7 ?}
 
-Le RandomForestClassifier calcule la probabilité comme la proportion d'arbres ayant voté \og anomalie \fg{} (classe 1). Avec 30 arbres, les valeurs possibles sont des multiples de $1/30 \approx 0.033$.
+Le RandomForestClassifier calcule le score comme la moyenne des distributions de classes dans les feuilles de chaque arbre. Avec des feuilles dont la proportion d'anomalies varie de 0 à 1 selon la région de l'espace des features, le score prend des valeurs continues et non des multiples de $1/30$.
 
-Quand 21~arbres sur 30 détectent l'anomalie (0.7) mais que 9~votent \og normal \fg{} à cause de similarités résiduelles avec le régime normal (bruit, oscillations), le score se stabilise à 0.7. Atteindre 0.8 nécessiterait 24~arbres d'accord — possible mais plus rare.
+Quand 21~arbres sur 30 orientent la donnée vers des feuilles à forte proportion d'anomalies (0.8--1.0) mais que les 9 autres l'envoient vers des feuilles majoritairement normales (0.3--0.5), la moyenne se stabilise autour de 0.7. Atteindre 0.8 nécessiterait que presque toutes les feuilles soient à $>$0.8 — possible mais plus rare.
 
 \begin{center}
 \begin{tabular}{|c|c|}
 \hline
 \textbf{Score} & \textbf{Signification} \\
 \hline
-0.02 -- 0.06 & Tous les arbres disent normal \\
-0.3 -- 0.5 & Divergence naissante \\
-\textbf{0.7} & \textbf{Majorité solide → alerte rouge} \\
+0.02 -- 0.06 & Toutes les feuilles sont quasi-pures (normales) \\
+0.3 -- 0.5 & Divergence naissante, feuilles partagées \\
+\textbf{0.7} & \textbf{Majorité des feuilles penchent vers anomalie} \\
 0.9+ & Consensus quasi-unanime (rare à cause du bruit) \\
 \hline
 \end{tabular}
@@ -479,15 +479,23 @@ Le dashboard contient 4 panels :
 
 \subsubsection{Interprétation du score d'anomalie}
 
-Le score affiché (\textit{stat panel} \og Niveau d'anomalie \fg) est la proportion d'arbres du RandomForest ayant voté \og anomalie \fg{} --- ce n'est \textbf{pas un pourcentage de risque}. En régime normal, 1 arbre sur 30 peut voter anomalie à cause du bruit, donnant $1/30 \approx 0.033$. La valeur $0.026$ observée en pratique signifie qu'en moyenne moins d'un arbre détecte une variation, ce qui est négligeable.
+Le score affiché (\textit{stat panel} \og Niveau d'anomalie \fg) est la moyenne des distributions de classes issues des feuilles de chaque arbre du RandomForest. Ce n'est \textbf{pas} un simple comptage d'arbres ayant voté \og anomalie \fg{}.
+
+\noindent\textbf{Fonctionnement :} chaque arbre du RandomForest, au lieu de voter binairement (normal/anomalie), renvoie la proportion de classes dans la feuille où arrive la donnée. Par exemple, si une feuille contient 95 échantillons \og normal \fg{} et 5 \og anomalie \fg{} (résidu des données d'entraînement), l'arbre produit $[0.95, 0.05]$. Le score final est la moyenne de ces 30 distributions :
+
+\[
+\text{score} = \frac{1}{30} \sum_{i=1}^{30} \text{proportion\_anomalie}(\text{feuille}_i)
+\]
+
+En régime normal, chaque feuille contient un petit résidu d'échantillons anormaux (le dataset d'entraînement avait $\sim$8.6\% d'anomalies), donnant une moyenne de $\sim$0.026. Ce n'est ni un risque de 2.6\% ni un arbre sur 30 — c'est simplement la sortie du modèle quand tout est stable.
 
 \begin{itemize}
-    \item \textbf{0.000 -- 0.399} (fond \textcolor{green}{vert}) : fonctionnement nominal. Aucune action requise.
-    \item \textbf{0.400 -- 0.699} (fond \textcolor{#d29922}{jaune}) : dérive détectée. Surveillance renforcée conseillée.
-    \item \textbf{0.700 -- 1.000} (fond \textcolor{red}{rouge}) : anomalie confirmée. Intervention requise.
+    \item \textbf{0.000 -- 0.399} (couleur \textcolor{green}{vert}) : fonctionnement nominal. Aucune action requise.
+    \item \textbf{0.400 -- 0.699} (couleur \textcolor{#d29922}{jaune}) : dérive détectée. Surveillance renforcée conseillée.
+    \item \textbf{0.700 -- 1.000} (couleur \textcolor{red}{rouge}) : anomalie confirmée. Intervention requise.
 \end{itemize}
 
-\textbf{Le score n'est pas une mesure de santé globale.} Il ne reflète que les deux capteurs simulés (température et vibration) et ne remplace pas une inspection réelle. Un score de 0.026 n'est pas un risque de 2.6\% --- c'est simplement la sortie du modèle quand tout est stable.
+\textbf{Le score n'est pas une mesure de santé globale.} Il ne reflète que les deux capteurs simulés (température et vibration) et ne remplace pas une inspection réelle.
 
 \subsubsection{Requêtes et rafraîchissement}
 
