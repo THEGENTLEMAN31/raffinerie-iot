@@ -77,7 +77,7 @@
 
 \subsection{Vue d'ensemble}
 
-Le projet met en œuvre une pipeline Big Data de bout en bout pour la surveillance prédictive d'équipements industriels (échangeur thermique \texttt{pipe-101} et pompe \texttt{pump-303}) dans une raffinerie. Les données simulées transitent par une architecture en couches :
+Le projet met en œuvre une pipeline Big Data de bout en bout pour la surveillance prédictive d'équipements industriels (échangeur thermique \texttt{pipe-101}) dans une raffinerie. Les données simulées transitent par une architecture en couches :
 
 \begin{center}
 \small
@@ -186,7 +186,8 @@ Le lancement est entièrement géré par Docker Compose :
 \begin{itemize}
     \item \texttt{docker compose up -d} : démarre les 11 services (MQTT, Kafka, Zookeeper, Spark master/worker, MinIO, TimescaleDB, Grafana, simulateur, bridge MQTT-Kafka, webapp). L'ordre de démarrage est contrôlé par \texttt{depends\_on}.
     \item \texttt{restart.sh} : script de commodité qui exécute \texttt{docker compose up -d --build} et vérifie que tous les conteneurs sont opérationnels.
-    \item \textbf{Webapp} : accessible sur \texttt{http://localhost:8081}, permet de lancer/arrêter la pipeline (simulateur + bridge + Spark) via des boutons HTMX.
+    \item \textbf{Webapp} : accessible sur \texttt{http://localhost:8081}, permet de lancer/arrêter la pipeline (simulateur + bridge + Spark) via des boutons HTMX. Un lien direct vers Grafana est présent dans la barre de navigation.
+    \item \textbf{Gestion des machines} : depuis l'interface web, l'opérateur peut ajouter, supprimer, activer ou désactiver des machines. Le simulateur détecte automatiquement les changements dans les 60~secondes.
     \item \texttt{spark-submit} : soumet \texttt{traitement\_kpi.py} sur le cluster Spark (master:7077). Les paquets Kafka et PostgreSQL sont injectés via \texttt{--packages}. Le lancement se fait automatiquement via l'interface web ou manuellement par \texttt{docker exec spark-master spark-submit ...}.
     \item \texttt{spark-submit} pour l'entraînement : \texttt{train\_model.py} lit depuis MinIO (via S3A Hadoop), entraîne, et sauvegarde localement.
 \end{itemize}
@@ -542,6 +543,7 @@ POST & \texttt{/pipeline/stop} & Arrête simulateur, bridge, tue Spark \\
 POST & \texttt{/pipeline/restart} & Stop puis start (avec pause de 2s) \\
 POST & \texttt{/config/machines/add} & Ajoute/met à jour une machine \\
 POST & \texttt{/config/machines/delete/\{id\}} & Supprime une machine \\
+POST & \texttt{/config/machines/toggle/\{id\}} & Active/désactive une machine \\
 POST & \texttt{/config/threshold} & Modifie le seuil d'alerte \\
 \hline
 \end{tabular}
@@ -549,14 +551,9 @@ POST & \texttt{/config/threshold} & Modifie le seuil d'alerte \\
 
 \subsection{Contrôle Docker depuis l'interface}
 
-La webapp contrôle les conteneurs via deux mécanismes :
+La webapp contrôle les conteneurs via le SDK Docker Python (\texttt{docker.from\_env()}) : le socket Docker (\texttt{/var/run/docker.sock}) est monté dans le conteneur webapp. Pour lancer le \texttt{spark-submit} dans le conteneur \texttt{spark-master}, la webapp utilise \texttt{container.exec\_run()} (détaché pour ne pas bloquer la réponse HTTP).
 
-\begin{enumerate}
-    \item \textbf{Docker SDK Python} (\texttt{docker.from\_env()}) : le socket Docker (\texttt{/var/run/docker.sock}) est monté dans le conteneur webapp. Cela permet de lister, démarrer et arrêter les conteneurs simulateur et mqtt-bridge.
-    \item \textbf{Docker exec} via le SDK : pour lancer le \texttt{spark-submit} dans le conteneur \texttt{spark-master}, la webapp utilise \texttt{container.exec\_run()}. Le Spark job est détaché (\texttt{detach=True}) pour ne pas bloquer la réponse HTTP.
-\end{enumerate}
-
-Contrainte de sécurité : le socket Docker est monté en lecture-écriture. Dans un environnement de production, il faudrait restreindre les permissions ou utiliser une API Docker sécurisée.
+Les formulaires de configuration (ajout/suppression/toggle machine, seuil) renvoient un header \texttt{HX-Refresh: true} : HTMX rafraîchit la page automatiquement après l'action, évitant l'affichage de JSON brut.
 
 \subsection{Configuration des machines et du seuil}
 
@@ -689,6 +686,7 @@ La page d'accueil affiche :
     \item \textbf{Statut des services} : tableau avec trois lignes (Simulateur, Pont MQTT-Kafka, Spark Inference). Chaque statut est coloré (vert pour \texttt{running}, rouge pour \texttt{stopped}). Ce fragment est rafraîchi automatiquement toutes les 5~secondes via HTMX.
     \item \textbf{Boutons de contrôle} : Démarrer, Arrêter, Redémarrer. Chaque bouton envoie une requête POST à la route correspondante via HTMX.
     \item \textbf{Dernière prédiction} : affiche le dernier score d'anomalie enregistré dans \texttt{alertes\_predictions}.
+    \item \textbf{Machines} : liste de toutes les machines configurées avec leur statut (Actif/Inactif) et un bouton pour les activer ou désactiver directement depuis le dashboard.
     \item \textbf{Nombre de machines actives} : comptage depuis \texttt{machine\_config WHERE enabled = true}.
 \end{itemize}
 
@@ -697,10 +695,14 @@ La page d'accueil affiche :
 La page de configuration permet :
 
 \begin{itemize}
-    \item \textbf{Lister les machines} : tableau des machines configurées avec leurs paramètres (température cible, vibration cible, alpha).
+    \item \textbf{Lister les machines} : tableau des machines configurées avec leurs paramètres (température cible, vibration cible, alpha) et leur état (Oui/Non). Chaque ligne dispose de boutons \og Activer/Désactiver \fg{} et \og Supprimer \fg{}.
     \item \textbf{Ajouter une machine} : formulaire avec ID, type (pipe/pump/generic), température et vibration cibles. L'insertion utilise \texttt{ON CONFLICT ... DO UPDATE}, ce qui permet aussi de modifier une machine existante.
     \item \textbf{Modifier le seuil d'alerte} : champ numérique avec valeur par défaut 0.7, limites 0.0--1.0, pas de 0.05.
 \end{itemize}
+
+\subsubsection{Accès à Grafana}
+
+Un lien \og Grafana \fg{} dans la barre de navigation (onglet \texttt{target="\_blank"}) donne accès au dashboard Grafana à l'adresse \texttt{http://localhost:3000}.
 
 \subsection{Vérification et tests}
 
@@ -710,7 +712,7 @@ Les vérifications suivantes ont été effectuées après déploiement :
     \item \textbf{Endpoints HTTP} : les 3 pages (dashboard, config, status) répondent avec le code 200 et le HTML est valide.
     \item \textbf{Pipeline start} : les boutons Démarrer et Redémarrer lancent correctement le simulateur, le bridge, et soumettent le job Spark.
     \item \textbf{Modification du seuil} : la route \texttt{POST /config/threshold} met à jour la table \texttt{alert\_config} et retourne le nouveau seuil.
-    \item \textbf{Configuration multi-machines} : le simulateur publie sur les topics hiérarchiques pour pipe-101 et pump-303. Les deux machines sont visibles dans le flux Kafka.
+    \item \textbf{Gestion des machines} : l'activation/désactivation depuis l'interface web est prise en compte par le simulateur dans les 60~secondes. Les données des machines désactivées cessent d'être publiées dans Kafka.
     \item \textbf{Dockerisation} : les trois nouveaux conteneurs (simulateur, mqtt-bridge, webapp) démarrent sans erreur et les dépendances inter-conteneurs sont respectées.
     \item \textbf{Collecte des logs} : les conteneurs produisent des logs lisibles (timestamp, machine\_id, valeurs) facilitant le débogage.
 \end{itemize}
