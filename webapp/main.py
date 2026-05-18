@@ -61,9 +61,12 @@ def dashboard(request: Request):
         pass
 
     nb_machines = 0
+    machines = []
     try:
         conn = db()
         cur = conn.cursor()
+        cur.execute("SELECT machine_id, machine_type, enabled FROM machine_config ORDER BY machine_id")
+        machines = cur.fetchall()
         cur.execute("SELECT count(*) FROM machine_config WHERE enabled = true")
         nb_machines = cur.fetchone()[0]
         cur.close()
@@ -74,7 +77,8 @@ def dashboard(request: Request):
     return templates.TemplateResponse(request, "dashboard.html", {
         "status": status,
         "derniere_pred": derniere_pred,
-        "nb_machines": nb_machines
+        "nb_machines": nb_machines,
+        "machines": machines
     })
 
 @app.get("/config", response_class=HTMLResponse)
@@ -208,6 +212,19 @@ def delete_machine(machine_id: str):
     cur.close()
     conn.close()
     return {"status": "deleted", "machine_id": machine_id}
+
+@app.post("/config/machines/toggle/{machine_id}")
+def toggle_machine(machine_id: str):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE machine_config SET enabled = NOT enabled, updated_at = now() WHERE machine_id=%s RETURNING enabled", (machine_id,))
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    if row:
+        return {"status": "ok", "machine_id": machine_id, "enabled": row[0]}
+    return {"status": "error", "message": "Machine introuvable"}
 
 # --- CONFIG SEUIL ---
 

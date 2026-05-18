@@ -24,6 +24,19 @@
 <div class="card">
     <h2>Machines Actives</h2>
     <div class="val">{{ nb_machines }}</div>
+    {% if machines %}
+    <table style="margin-top:10px">
+        <tr><th>ID</th><th>Type</th><th>Statut</th><th></th></tr>
+        {% for m in machines %}
+        <tr>
+            <td>{{ m[0] }}</td>
+            <td>{{ m[1] }}</td>
+            <td class="{{ 'status-green' if m[2] else 'status-red' }}">{{ "Actif" if m[2] else "Inactif" }}</td>
+            <td><button class="btn small-btn {{ 'btn-yellow' if m[2] else 'btn-green' }}" hx-post="/config/machines/toggle/{{ m[0] }}" hx-target="body">{{ "Desactiver" if m[2] else "Activer" }}</button></td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
 </div>
 
 {% endblock %}

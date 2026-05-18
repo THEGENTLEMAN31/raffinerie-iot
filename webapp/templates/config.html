@@ -4,16 +4,20 @@
 <div class="card">
     <h2>Machines</h2>
     <table>
-        <tr><th>ID</th><th>Type</th><th>Temp. cible</th><th>Vib. cible</th><th>Alpha T</th><th>Alpha V</th><th></th></tr>
+        <tr><th>ID</th><th>Type</th><th>Actif</th><th>Temp. cible</th><th>Vib. cible</th><th>Alpha T</th><th>Alpha V</th><th></th></tr>
         {% for m in machines %}
         <tr>
             <td>{{ m[0] }}</td>
             <td>{{ m[1] }}</td>
+            <td>{{ "Oui" if m[2] else "Non" }}</td>
             <td>{{ m[3] }}</td>
             <td>{{ m[4] }}</td>
             <td>{{ m[5] }}</td>
             <td>{{ m[6] }}</td>
-            <td><button class="btn btn-red" hx-post="/config/machines/delete/{{ m[0] }}" hx-target="body">Suppr</button></td>
+            <td>
+                <button class="btn {{ 'btn-green' if not m[2] else 'btn-yellow' }}" hx-post="/config/machines/toggle/{{ m[0] }}" hx-target="body">{{ "Activer" if not m[2] else "Desactiver" }}</button>
+                <button class="btn btn-red" hx-post="/config/machines/delete/{{ m[0] }}" hx-target="body">Suppr</button>
+            </td>
         </tr>
         {% endfor %}
     </table>
