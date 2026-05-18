@@ -1,6 +1,6 @@
 import os, time, json
 from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import psycopg2
@@ -201,7 +201,7 @@ def add_machine(machine_id: str = Form(...), machine_type: str = Form("pipe"),
     conn.commit()
     cur.close()
     conn.close()
-    return {"status": "ok", "machine_id": machine_id}
+    return Response(headers={"HX-Refresh": "true"})
 
 @app.post("/config/machines/delete/{machine_id}")
 def delete_machine(machine_id: str):
@@ -211,7 +211,7 @@ def delete_machine(machine_id: str):
     conn.commit()
     cur.close()
     conn.close()
-    return {"status": "deleted", "machine_id": machine_id}
+    return Response(headers={"HX-Refresh": "true"})
 
 @app.post("/config/machines/toggle/{machine_id}")
 def toggle_machine(machine_id: str):
@@ -223,8 +223,8 @@ def toggle_machine(machine_id: str):
     cur.close()
     conn.close()
     if row:
-        return {"status": "ok", "machine_id": machine_id, "enabled": row[0]}
-    return {"status": "error", "message": "Machine introuvable"}
+        return Response(headers={"HX-Refresh": "true"})
+    return Response(status_code=404, headers={"HX-Refresh": "true"})
 
 # --- CONFIG SEUIL ---
 
@@ -239,4 +239,4 @@ def set_threshold(seuil: float = Form(...)):
     conn.commit()
     cur.close()
     conn.close()
-    return {"status": "ok", "seuil": seuil}
+    return Response(headers={"HX-Refresh": "true"})
