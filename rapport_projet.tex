@@ -474,11 +474,20 @@ Le dashboard contient 4 panels :
     \item \textbf{Température par machine} : time series depuis \texttt{mesures\_filtrees} où \texttt{type\_capteur = 'temperature'}.
     \item \textbf{Vibrations par machine} : time series depuis \texttt{mesures\_filtrees} où \texttt{type\_capteur = 'vibration'}.
     \item \textbf{Alertes Prédictives -- Score d'Anomalie} : time series depuis \texttt{alertes\_predictions}, avec un seuil horizontal à 0.7 (ligne rouge).
-    \item \textbf{Risque Anomalie (jauge)} : jauge configurée sur l'intervalle $[0, 1]$, affichant la dernière prédiction :
-    \[
-    \texttt{SELECT score\_anomalie AS value FROM alertes\_predictions ORDER BY timestamp DESC LIMIT 1}
-    \]
+    \item \textbf{Score d'Anomalie} : stat panel affichant la dernière valeur de \texttt{alertes\_predictions} avec un fond coloré (vert $<$ 0.4, jaune [0.4, 0.7[, rouge $\geq$ 0.7). La couleur donne un diagnostic immédiat sans interpréter le score brut.
 \end{enumerate}
+
+\subsubsection{Interprétation du score d'anomalie}
+
+Le score affiché (\textit{stat panel} \og Niveau d'anomalie \fg) est la proportion d'arbres du RandomForest ayant voté \og anomalie \fg{} --- ce n'est \textbf{pas un pourcentage de risque}. En régime normal, 1 arbre sur 30 peut voter anomalie à cause du bruit, donnant $1/30 \approx 0.033$. La valeur $0.026$ observée en pratique signifie qu'en moyenne moins d'un arbre détecte une variation, ce qui est négligeable.
+
+\begin{itemize}
+    \item \textbf{0.000 -- 0.399} (fond \textcolor{green}{vert}) : fonctionnement nominal. Aucune action requise.
+    \item \textbf{0.400 -- 0.699} (fond \textcolor{#d29922}{jaune}) : dérive détectée. Surveillance renforcée conseillée.
+    \item \textbf{0.700 -- 1.000} (fond \textcolor{red}{rouge}) : anomalie confirmée. Intervention requise.
+\end{itemize}
+
+\textbf{Le score n'est pas une mesure de santé globale.} Il ne reflète que les deux capteurs simulés (température et vibration) et ne remplace pas une inspection réelle. Un score de 0.026 n'est pas un risque de 2.6\% --- c'est simplement la sortie du modèle quand tout est stable.
 
 \subsubsection{Requêtes et rafraîchissement}
 
@@ -777,7 +786,7 @@ Pour l'entretien, pouvoir dessiner ce schéma sur un tableau ou papier :
 \begin{itemize}
     \item \textbf{Le modèle est unique} pour les deux capteurs (feature \texttt{sensor\_idx}).
     \item \textbf{Le dataset d'entraînement} a été généré par le même simulateur que le flux temps réel (cohérence de la distribution).
-    \item \textbf{La jauge Grafana} affiche la dernière prédiction (pas la moyenne). En anomalie passagère, le score redescend dès le retour à la normale.
+    \item \textbf{L'indicateur d'anomalie Grafana} est un \textit{stat panel} avec fond coloré, pas une jauge. La couleur (vert/jaune/rouge) donne le diagnostic ; la valeur brute du score (\textasciitilde0.026) n'est pas un pourcentage de risque mais la proportion d'arbres du RandomForest ayant voté \og anomalie \fg{} (voir explication section Visualisation Grafana).
     \item \textbf{Les checkpoints Spark} (\texttt{/tmp/checkpoint\_*}) doivent être nettoyés entre chaque redémarrage pour éviter des conflits d'état (\texttt{FileNotFoundException} sur les deltas).
     \item \textbf{NumPy} doit être accessible à l'exécuteur Spark (installé dans un répertoire du PYTHONPATH).
 \end{itemize}
