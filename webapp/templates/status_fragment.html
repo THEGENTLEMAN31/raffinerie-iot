@@ -1,0 +1,5 @@
+<table>
+    <tr><td>Simulateur</td><td class="{% if status.simulateur == 'running' %}status-green{% else %}status-red{% endif %}">{{ status.simulateur }}</td></tr>
+    <tr><td>Pont MQTT-Kafka</td><td class="{% if status.bridge == 'running' %}status-green{% else %}status-red{% endif %}">{{ status.bridge }}</td></tr>
+    <tr><td>Spark Inference</td><td class="{% if status.spark == 'running' %}status-green{% else %}status-red{% endif %}">{{ status.spark }}</td></tr>
+</table>

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+    <h2>Machines</h2>
+    <table>
+        <tr><th>ID</th><th>Type</th><th>Temp. cible</th><th>Vib. cible</th><th>Alpha T</th><th>Alpha V</th><th></th></tr>
+        {% for m in machines %}
+        <tr>
+            <td>{{ m[0] }}</td>
+            <td>{{ m[1] }}</td>
+            <td>{{ m[3] }}</td>
+            <td>{{ m[4] }}</td>
+            <td>{{ m[5] }}</td>
+            <td>{{ m[6] }}</td>
+            <td><button class="btn btn-red" hx-post="/config/machines/delete/{{ m[0] }}" hx-target="body">Suppr</button></td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+
+<div class="card">
+    <h2>Ajouter une Machine</h2>
+    <form hx-post="/config/machines/add" hx-target="body">
+        <div><label>ID</label><input name="machine_id" required></div>
+        <div><label>Type</label><select name="machine_type"><option value="pipe">Pipe</option><option value="pump">Pump</option><option value="generic">Generic</option></select></div>
+        <div><label>Temp. cible</label><input name="target_temp" value="95.0" step="0.1"></div>
+        <div><label>Vib. cible</label><input name="target_vib" value="1.2" step="0.1"></div>
+        <button class="btn btn-green" type="submit">Ajouter</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Seuil d'Alerte</h2>
+    <p class="small">Actuel : <strong>{{ seuil }}</strong></p>
+    <form hx-post="/config/threshold" hx-target="body">
+        <div><label>Nouveau seuil (0.0 - 1.0)</label><input name="seuil" value="{{ seuil }}" step="0.05" min="0" max="1"></div>
+        <button class="btn" type="submit">Appliquer</button>
+    </form>
+    <p class="small" style="margin-top:8px;">Le seuil est lu par Spark au démarrage. Un redémarrage de la pipeline est nécessaire.</p>
+</div>
+
+{% endblock %}

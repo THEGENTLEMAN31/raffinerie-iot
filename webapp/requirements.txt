@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+jinja2
+aiofiles
+docker
+psycopg2-binary
+httptools
+python-multipart

@@ -127,7 +127,7 @@ Le cheminement d'une mesure, de sa création à son affichage, est le suivant :
 
 \subsection{Déploiement Docker}
 
-Les 8 services sont déployés via Docker Compose sur un réseau bridge \texttt{iot-net} :
+Les 11 services sont déployés via Docker Compose sur un réseau bridge \texttt{iot-net} :
 
 \begin{lstlisting}[language=yaml,caption={Structure du docker-compose.yml},label={lst:compose}]
 services:
@@ -139,6 +139,9 @@ services:
   minio:        image: minio/minio                   ports: 9000, 9001
   timescaledb:  image: timescale/timescaledb:2.14.2-pg14  ports: 5432
   grafana:      image: grafana/grafana:10.2.3        ports: 3000
+  simulateur:   build: ./simulateur                  # Multi-machines, lecture DB
+  mqtt-bridge:  build: ./bridge                      # Wildcard topics MQTT
+  webapp:       build: ./webapp                      # FastAPI + HTMX, ports: 8081
 \end{lstlisting}
 
 \newpage
@@ -178,11 +181,13 @@ Checkpoints Spark & \texttt{/tmp/checkpoint\_*} (dans le conteneur master) & Vol
 
 \subsection{Orchestration et lancement}
 
-Les scripts sont lancés manuellement (pas d'orchestrateur de workflow) :
+Le lancement est entièrement géré par Docker Compose :
 
 \begin{itemize}
-    \item \texttt{start.sh} : lance \texttt{simulateur\_capteurs.py} et \texttt{mqtt\_to\_kafka.py} en arrière-plan via \texttt{nohup}.
-    \item \texttt{spark-submit} : soumet \texttt{traitement\_kpi.py} sur le cluster Spark (master:7077). Les paquets Kafka et PostgreSQL sont injectés via \texttt{--packages}.
+    \item \texttt{docker compose up -d} : démarre les 11 services (MQTT, Kafka, Zookeeper, Spark master/worker, MinIO, TimescaleDB, Grafana, simulateur, bridge MQTT-Kafka, webapp). L'ordre de démarrage est contrôlé par \texttt{depends\_on}.
+    \item \texttt{restart.sh} : script de commodité qui exécute \texttt{docker compose up -d --build} et vérifie que tous les conteneurs sont opérationnels.
+    \item \textbf{Webapp} : accessible sur \texttt{http://localhost:8081}, permet de lancer/arrêter la pipeline (simulateur + bridge + Spark) via des boutons HTMX.
+    \item \texttt{spark-submit} : soumet \texttt{traitement\_kpi.py} sur le cluster Spark (master:7077). Les paquets Kafka et PostgreSQL sont injectés via \texttt{--packages}. Le lancement se fait automatiquement via l'interface web ou manuellement par \texttt{docker exec spark-master spark-submit ...}.
     \item \texttt{spark-submit} pour l'entraînement : \texttt{train\_model.py} lit depuis MinIO (via S3A Hadoop), entraîne, et sauvegarde localement.
 \end{itemize}
 
@@ -481,6 +486,248 @@ Chaque panel utilise une requête SQL directe vers le datasource PostgreSQL (Tim
 \newpage
 
 % ============================================================
+% AXE 3 : INTERFACE WEB ET DOCKERISATION
+% ============================================================
+\section{Axe 3 : Interface de Contrôle Web et Conteneurisation}
+\label{sec:web}
+
+\subsection{Objectif}
+
+Permettre le contrôle et la configuration de la pipeline IoT depuis une interface web, sans nécessiter d'accès SSH ni de commandes manuelles. Les fonctionnalités attendues sont :
+\begin{itemize}
+    \item Lancer / arrêter / redémarrer la pipeline (simulateur, bridge, Spark).
+    \item Configurer les machines simulées (ajout, suppression, paramètres cibles).
+    \item Définir le seuil d'alerte du modèle de prédiction.
+    \item Visualiser en temps réel l'état des services.
+\end{itemize}
+
+\subsection{Architecture de l'interface web}
+
+L'interface utilise \textbf{FastAPI} (framework Python asynchrone) pour le backend et \textbf{HTMX} pour le frontend. Le choix HTMX plutôt qu'un framework JavaScript (React, Vue) repose sur plusieurs critères :
+
+\begin{itemize}
+    \item \textbf{Absence de build step} : pas de transpilation, pas de bundle. Les templates Jinja2 sont servis directement par le backend.
+    \item \textbf{Architecture server-driven} : chaque action (start/stop, modification de config) provoque une requête HTTP vers une route FastAPI qui renvoie du HTML partiel.
+    \item \textbf{3 écrans seulement} : dashboard, configuration, fragment de statut. Le surcoût d'un SPA serait disproportionné.
+    \item \textbf{Mise à jour automatique} : HTMX permet de rafraîchir un fragment de page (\texttt{<div>}) toutes les 5~secondes via l'attribut \texttt{hx-trigger="every 5s"}.
+\end{itemize}
+
+\subsection{Structure de l'application}
+
+\begin{lstlisting}[language=bash,caption={Arborescence de l'interface web}]
+webapp/
+  Dockerfile              # Image Python 3.11-slim
+  requirements.txt        # fastapi, uvicorn, jinja2, docker, psycopg2-binary
+  main.py                 # Routes FastAPI (7 routes)
+  templates/
+    base.html             # Layout commun (nav, style, HTMX CDN)
+    dashboard.html        # Page d'accueil : statuts + controles
+    config.html           # Configuration machines + seuil
+    status_fragment.html  # Fragment HTMX (statut des services)
+\end{lstlisting}
+
+\subsection{Routes FastAPI}
+
+\begin{center}
+\small
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Méthode} & \textbf{Path} & \textbf{Fonction} \\
+\hline
+GET & \texttt{/} & Dashboard principal : statuts, dernière prédiction, nb machines \\
+GET & \texttt{/config} & Page de configuration : liste machines + seuil \\
+GET & \texttt{/status} & Fragment HTML des statuts (HTMX, refresh 5s) \\
+POST & \texttt{/pipeline/start} & Démarre simulateur, bridge, soumet Spark \\
+POST & \texttt{/pipeline/stop} & Arrête simulateur, bridge, tue Spark \\
+POST & \texttt{/pipeline/restart} & Stop puis start (avec pause de 2s) \\
+POST & \texttt{/config/machines/add} & Ajoute/met à jour une machine \\
+POST & \texttt{/config/machines/delete/\{id\}} & Supprime une machine \\
+POST & \texttt{/config/threshold} & Modifie le seuil d'alerte \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Contrôle Docker depuis l'interface}
+
+La webapp contrôle les conteneurs via deux mécanismes :
+
+\begin{enumerate}
+    \item \textbf{Docker SDK Python} (\texttt{docker.from\_env()}) : le socket Docker (\texttt{/var/run/docker.sock}) est monté dans le conteneur webapp. Cela permet de lister, démarrer et arrêter les conteneurs simulateur et mqtt-bridge.
+    \item \textbf{Docker exec} via le SDK : pour lancer le \texttt{spark-submit} dans le conteneur \texttt{spark-master}, la webapp utilise \texttt{container.exec\_run()}. Le Spark job est détaché (\texttt{detach=True}) pour ne pas bloquer la réponse HTTP.
+\end{enumerate}
+
+Contrainte de sécurité : le socket Docker est monté en lecture-écriture. Dans un environnement de production, il faudrait restreindre les permissions ou utiliser une API Docker sécurisée.
+
+\subsection{Configuration des machines et du seuil}
+
+\subsubsection{Tables de configuration dans TimescaleDB}
+
+Deux nouvelles tables stockent la configuration :
+
+\begin{lstlisting}[language=SQL,caption={Tables de configuration}]
+-- Machine config
+CREATE TABLE machine_config (
+    machine_id   TEXT PRIMARY KEY,
+    machine_type TEXT NOT NULL DEFAULT 'pipe',
+    enabled      BOOLEAN DEFAULT true,
+    target_temp  DOUBLE PRECISION DEFAULT 95.0,
+    target_vib   DOUBLE PRECISION DEFAULT 1.2,
+    alpha_temp   DOUBLE PRECISION DEFAULT 0.05,
+    alpha_vib    DOUBLE PRECISION DEFAULT 0.2,
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    updated_at   TIMESTAMPTZ DEFAULT now()
+);
+
+-- Alert threshold config
+CREATE TABLE alert_config (
+    seuil_anomalie DOUBLE PRECISION DEFAULT 0.7,
+    machine_id TEXT DEFAULT NULL,
+    type_capteur TEXT DEFAULT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+\end{lstlisting}
+
+\subsubsection{Propagation de la configuration}
+
+La configuration est propagée dans la pipeline selon deux stratégies :
+
+\begin{itemize}
+    \item \textbf{Simulateur} : lit \texttt{machine\_config} au démarrage et toutes les 60~secondes. Si une machine est ajoutée ou activée, le simulateur commence à publier ses données. Si une machine est désactivée, elle est retirée du cycle de publication.
+    \item \textbf{Spark} : lit \texttt{seuil\_anomalie} depuis \texttt{alert\_config} au démarrage du streaming. Le seuil n'est pas relu en continu (la modification du seuil nécessite un redémarrage de la pipeline via le bouton \og Redémarrer \fg{} de l'interface).
+\end{itemize}
+
+\subsection{Dockerisation des composants additionnels}
+
+\subsubsection{Simulateur Dockerisé}
+
+Le simulateur, auparavant script hôte lancé avec \texttt{nohup}, est maintenant un conteneur Docker :
+
+\begin{lstlisting}[language=Dockerfile,caption={Dockerfile du simulateur}]
+FROM python:3.11-slim
+WORKDIR /app
+RUN pip install paho-mqtt psycopg2-binary
+COPY simulateur_capteurs.py .
+ENV PYTHONUNBUFFERED=1
+CMD ["python3", "simulateur_capteurs.py"]
+\end{lstlisting}
+
+Le simulateur Dockerisé lit sa configuration depuis TimescaleDB via \texttt{psycopg2}. Les topics MQTT sont désormais hiérarchiques :
+\[
+\texttt{raffinerie/\{machine\_id\}/temp} \quad \text{et} \quad \texttt{raffinerie/\{machine\_id\}/vib}
+\]
+
+Cette structure permet au bridge MQTT-Kafka de souscrire avec des wildcards :
+\[
+\texttt{raffinerie/+/temp} \quad \text{et} \quad \texttt{raffinerie/+/vib}
+\]
+
+Ainsi, ajouter une machine dans \texttt{machine\_config} suffit pour que le simulateur commence à publier sur son topic dédié, sans modifier aucun code ni configuration.
+
+\subsubsection{Pont MQTT-Kafka Dockerisé}
+
+Le bridge est lui aussi conteneurisé. Il intègre une boucle d'attente pour Kafka :
+
+\begin{lstlisting}[language=Python,caption={Boucle d'attente pour Kafka dans mqtt\_to\_kafka.py}]
+def wait_for_kafka(broker, retries=30, delay=2):
+    for i in range(retries):
+        try:
+            p = KafkaProducer(bootstrap_servers=broker)
+            p.close()
+            return
+        except NoBrokersAvailable:
+            time.sleep(delay)
+    sys.exit(1)  # Kafka inaccessible
+\end{lstlisting}
+
+Cette boucle résout le problème de \textit{race condition} au démarrage : Kafka peut prendre plusieurs secondes à être prêt, tandis que le bridge se lance immédiatement.
+
+\subsection{Docker Compose mis à jour}
+
+Le fichier \texttt{docker-compose.yml} passe de 8 à 11 services avec l'ajout de :
+
+\begin{lstlisting}[language=yaml,caption={Nouveaux services dans docker-compose.yml}]
+simulateur:
+  build: ./simulateur
+  depends_on: [mqtt, timescaledb]
+  environment:
+    MQTT_BROKER: mqtt
+    DB_HOST: timescaledb
+
+mqtt-bridge:
+  build: ./bridge
+  depends_on: [mqtt, kafka]
+  environment:
+    MQTT_BROKER: mqtt
+    KAFKA_BROKER: kafka:29092
+
+webapp:
+  build: ./webapp
+  ports: ["8081:8080"]
+  volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+  environment:
+    DB_HOST: timescaledb
+\end{lstlisting}
+
+Le volume \texttt{initdb} est désormais monté dans TimescaleDB :
+\[
+\texttt{./initdb:/docker-entrypoint-initdb.d}
+\]
+
+Ce dossier contient \texttt{001\_config\_tables.sql} qui crée \texttt{machine\_config} et \texttt{alert\_config} avec les données par défaut au premier démarrage de la base.
+
+\subsection{Interface utilisateur (dashboard)}
+
+\subsubsection{Design et thème}
+
+L'interface adopte le thème sombre \og GitHub Dark \fg{} (fonds \texttt{\#0d1117}, cartes \texttt{\#161b22}, bordures \texttt{\#30363d}, accent bleu \texttt{\#58a6ff}). Aucun framework CSS externe n'est utilisé : les styles sont en \texttt{<style>} inline dans le template \texttt{base.html}.
+
+\subsubsection{Page dashboard}
+
+La page d'accueil affiche :
+
+\begin{itemize}
+    \item \textbf{Statut des services} : tableau avec trois lignes (Simulateur, Pont MQTT-Kafka, Spark Inference). Chaque statut est coloré (vert pour \texttt{running}, rouge pour \texttt{stopped}). Ce fragment est rafraîchi automatiquement toutes les 5~secondes via HTMX.
+    \item \textbf{Boutons de contrôle} : Démarrer, Arrêter, Redémarrer. Chaque bouton envoie une requête POST à la route correspondante via HTMX.
+    \item \textbf{Dernière prédiction} : affiche le dernier score d'anomalie enregistré dans \texttt{alertes\_predictions}.
+    \item \textbf{Nombre de machines actives} : comptage depuis \texttt{machine\_config WHERE enabled = true}.
+\end{itemize}
+
+\subsubsection{Page configuration}
+
+La page de configuration permet :
+
+\begin{itemize}
+    \item \textbf{Lister les machines} : tableau des machines configurées avec leurs paramètres (température cible, vibration cible, alpha).
+    \item \textbf{Ajouter une machine} : formulaire avec ID, type (pipe/pump/generic), température et vibration cibles. L'insertion utilise \texttt{ON CONFLICT ... DO UPDATE}, ce qui permet aussi de modifier une machine existante.
+    \item \textbf{Modifier le seuil d'alerte} : champ numérique avec valeur par défaut 0.7, limites 0.0--1.0, pas de 0.05.
+\end{itemize}
+
+\subsection{Vérification et tests}
+
+Les vérifications suivantes ont été effectuées après déploiement :
+
+\begin{itemize}
+    \item \textbf{Endpoints HTTP} : les 3 pages (dashboard, config, status) répondent avec le code 200 et le HTML est valide.
+    \item \textbf{Pipeline start} : les boutons Démarrer et Redémarrer lancent correctement le simulateur, le bridge, et soumettent le job Spark.
+    \item \textbf{Modification du seuil} : la route \texttt{POST /config/threshold} met à jour la table \texttt{alert\_config} et retourne le nouveau seuil.
+    \item \textbf{Configuration multi-machines} : le simulateur publie sur les topics hiérarchiques pour pipe-101 et pump-303. Les deux machines sont visibles dans le flux Kafka.
+    \item \textbf{Dockerisation} : les trois nouveaux conteneurs (simulateur, mqtt-bridge, webapp) démarrent sans erreur et les dépendances inter-conteneurs sont respectées.
+    \item \textbf{Collecte des logs} : les conteneurs produisent des logs lisibles (timestamp, machine\_id, valeurs) facilitant le débogage.
+\end{itemize}
+
+\subsection{Améliorations possibles}
+
+\begin{itemize}
+    \item \textbf{Rechargement du seuil à chaud} : faire relire le seuil par Spark périodiquement (toutes les 60~secondes) via un thread séparé, pour éviter le redémarrage de la pipeline.
+    \item \textbf{Authentification} : ajouter un login simple (FastAPI + JWT) pour sécuriser l'interface.
+    \item \textbf{Historique des actions} : journaliser les actions (démarrage, arrêt, modification de config) dans une table \texttt{pipeline\_logs}.
+    \item \textbf{Validation étendue} : vérifier que l'ID machine n'est pas vide et que les valeurs numériques sont dans des plages acceptables avant insertion.
+    \item \textbf{Notifications} : envoyer un email ou webhook (Slack/Teams) lors du déclenchement d'une alerte.
+\end{itemize}
+
+\newpage
+
+% ============================================================
 % SYNTHESE POUR L'ENTRETIEN
 % ============================================================
 \section{Préparation à l'entretien : points clés à maîtriser}
@@ -539,26 +786,46 @@ Pour l'entretien, pouvoir dessiner ce schéma sur un tableau ou papier :
 
 \begin{lstlisting}[language=bash,caption={Arborescence du projet}]
 raffinerie-iot/
-  docker-compose.yml        # 8 services
-  requirements.txt           # paho-mqtt, kafka-python
+  docker-compose.yml        # 11 services
+  restart.sh                # docker compose up + verifications
   README.md
   LOGIQUE_SIMULATION.md     # Documentation physique
 
-  simulateur_capteurs.py    # Generation donnees capteurs
-  mqtt_to_kafka.py          # Pont MQTT > Kafka
+  # Scripts hotes (legacy, conserves pour historique)
+  simulateur_capteurs.py    # Ancien simulateur (remplace par Docker)
+  mqtt_to_kafka.py          # Ancien bridge (remplace par Docker)
   generate_training_data.py # Dataset labellise > MinIO
   train_model.py            # Entrainement du RandomForest
-  start.sh                  # Lancement simulateur + pont
 
   spark/
     traitement_kpi.py       # Pipeline streaming + inference
-    train_model.py          # Entrainement (symlink ou copie)
+    traitement_kpi_debug.py # Version debug
+    train_model.py          # Entrainement
     predictive_model/       # Modele sauvegarde (3 stages)
-      metadata/
-      stages/
-        0_StringIndexer_9ffcbd801429/
-        1_VectorAssembler_4d029a60764d/
-        2_RandomForestClassifier_d1eb1f804266/
+    data/                   # Donnees d'entrainement
+
+  simulateur/               # Conteneurise
+    Dockerfile
+    requirements.txt
+    simulateur_capteurs.py  # Version multi-machines, lit la DB
+
+  bridge/                   # Conteneurise
+    Dockerfile
+    requirements.txt
+    mqtt_to_kafka.py        # Version wildcards, boucle d'attente Kafka
+
+  webapp/                   # Interface web FastAPI + HTMX
+    Dockerfile
+    requirements.txt
+    main.py
+    templates/
+      base.html
+      dashboard.html
+      config.html
+      status_fragment.html
+
+  initdb/                   # SQL d'initialisation TimescaleDB
+    001_config_tables.sql   # Tables machine_config, alert_config
 
   volumes/
     mqtt/mosquitto.conf

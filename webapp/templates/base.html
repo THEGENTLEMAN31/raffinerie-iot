@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raffinerie IoT</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; padding: 20px; }
+        h1 { color: #58a6ff; margin-bottom: 20px; font-size: 1.5em; }
+        h2 { color: #8b949e; font-size: 1.1em; margin: 15px 0 8px; }
+        .nav { display: flex; gap: 10px; margin-bottom: 25px; border-bottom: 1px solid #30363d; padding-bottom: 10px; }
+        .nav a { color: #58a6ff; text-decoration: none; padding: 5px 12px; border: 1px solid #30363d; border-radius: 4px; }
+        .nav a:hover { background: #1f2937; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 15px; margin-bottom: 15px; }
+        .status-green { color: #3fb950; }
+        .status-red { color: #f85149; }
+        .status-yellow { color: #d29922; }
+        .btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-family: inherit; }
+        .btn:hover { background: #30363d; }
+        .btn-green { background: #238636; border-color: #2ea043; }
+        .btn-green:hover { background: #2ea043; }
+        .btn-red { background: #da3633; border-color: #f85149; }
+        .btn-red:hover { background: #f85149; }
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #30363d; }
+        th { color: #8b949e; font-weight: normal; }
+        input, select { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; padding: 6px 10px; border-radius: 4px; font-family: inherit; width: 100%; }
+        form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+        form label { font-size: 0.85em; color: #8b949e; }
+        .val { font-size: 1.3em; font-weight: bold; }
+        .small { font-size: 0.85em; color: #8b949e; }
+        .flex { display: flex; gap: 15px; flex-wrap: wrap; }
+        .flex > * { flex: 1; min-width: 200px; }
+    </style>
+</head>
+<body>
+    <h1>RAFFINERIE IOT</h1>
+    <div class="nav">
+        <a href="/">Dashboard</a>
+        <a href="/config">Configuration</a>
+    </div>
+    <div id="main">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

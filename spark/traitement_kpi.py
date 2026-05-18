@@ -1,9 +1,10 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, window, avg, expr, to_timestamp, lag, udf, coalesce
+from pyspark.sql.functions import col, from_json, window, avg, expr, to_timestamp, lag, udf, coalesce, lit
 from pyspark.sql.types import StructType, StringType, FloatType, DoubleType
 from pyspark.ml import PipelineModel
 from pyspark.ml.linalg import VectorUDT
 from pyspark.sql import Window
+import psycopg2
 
 # 1. Définir le schéma attendu pour les messages JSON
 schema = StructType() \
@@ -90,7 +91,20 @@ print("Chargement du modèle prédictif...")
 model = PipelineModel.load("/home/spark/.ivy2/predictive_model")
 print("Modèle chargé.")
 
-SEUIL_ALERTE = 0.7
+def load_seuil():
+    try:
+        conn = psycopg2.connect(host="timescaledb", dbname="iotdb", user="admin", password="admin")
+        cur = conn.cursor()
+        cur.execute("SELECT seuil_anomalie FROM alert_config WHERE machine_id IS NULL AND type_capteur IS NULL LIMIT 1")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return float(row[0]) if row else 0.7
+    except:
+        return 0.7
+
+SEUIL_ALERTE = load_seuil()
+print(f"Seuil d'alerte charge depuis la base : {SEUIL_ALERTE}")
 
 extract_prob = udf(lambda v: float(v[1]) if v else 0.0, DoubleType())
 

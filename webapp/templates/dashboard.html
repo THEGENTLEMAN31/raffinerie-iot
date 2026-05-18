@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="flex">
+    <div class="card">
+        <h2>Etat de la Pipeline</h2>
+        <div id="pipeline-status" hx-get="/status" hx-trigger="every 5s">
+            {% include "status_fragment.html" %}
+        </div>
+    </div>
+    <div class="card">
+        <h2>Controle</h2>
+        <button class="btn btn-green" hx-post="/pipeline/start" hx-target="#pipeline-status">Démarrer</button>
+        <button class="btn btn-red" hx-post="/pipeline/stop" hx-target="#pipeline-status">Arrêter</button>
+        <button class="btn" hx-post="/pipeline/restart" hx-target="#pipeline-status">Redémarrer</button>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Dernière Prédiction</h2>
+    <div class="val">{{ derniere_pred }}</div>
+</div>
+
+<div class="card">
+    <h2>Machines Actives</h2>
+    <div class="val">{{ nb_machines }}</div>
+</div>
+
+{% endblock %}
