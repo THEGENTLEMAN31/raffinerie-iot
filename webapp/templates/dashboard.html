@@ -17,6 +17,13 @@
 </div>
 
 <div class="card">
+    <h2>Alerte en Direct</h2>
+    <div id="alert-current" hx-get="/alert-current" hx-trigger="every 5s">
+        {% include "alert_fragment.html" %}
+    </div>
+</div>
+
+<div class="card">
     <h2>Anomalies (5 min)</h2>
     <div class="val">
         {% if anomalies %}

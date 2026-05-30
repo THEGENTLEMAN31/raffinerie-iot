@@ -1,0 +1,25 @@
+{% if mid %}
+<div style="
+    background: {% if niveau == 'danger' %}#3d0000{% elif niveau == 'critique' %}#4a1a00{% else %}#3d2e00{% endif %};
+    border: 2px solid {% if niveau == 'danger' %}#f85149{% elif niveau == 'critique' %}#d29922{% else %}#bb8009{% endif %};
+    border-radius: 6px; padding: 15px; margin-top: 10px;
+">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <span style="font-size: 0.75em; color: #8b949e; text-transform: uppercase;">{{ capteur | upper }} — {{ mid }}</span>
+            <div style="font-size: 1.5em; font-weight: bold; color: {% if niveau == 'danger' %}#f85149{% elif niveau == 'critique' %}#d29922{% else %}#bb8009{% endif %};">
+                {{ valeur }}{{ "°C" if capteur == "temperature" else " mm/s" }}
+            </div>
+        </div>
+        <div style="text-align: right;">
+            <span style="font-size: 0.75em; color: #8b949e;">Score</span>
+            <div style="font-size: 1.3em; font-weight: bold; color: {% if niveau == 'danger' %}#f85149{% elif niveau == 'critique' %}#d29922{% else %}#bb8009{% endif %};">
+                {{ score }}
+            </div>
+        </div>
+    </div>
+    <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #30363d;">
+        <span style="color: {% if niveau == 'danger' %}#f85149{% elif niveau == 'critique' %}#d29922{% else %}#bb8009{% endif %}; font-weight: bold;">⚠ {{ action }}</span>
+    </div>
+</div>
+{% endif %}

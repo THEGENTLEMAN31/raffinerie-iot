@@ -122,6 +122,39 @@ def config_page(request: Request):
         "seuil": seuil
     })
 
+@app.get("/alert-current", response_class=HTMLResponse)
+def alert_current(request: Request):
+    try:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT machine_id, type_capteur, valeur, score_anomalie, timestamp
+            FROM alertes_predictions
+            WHERE score_anomalie >= 0.7
+            ORDER BY timestamp DESC LIMIT 1
+        """)
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            mid, capteur, valeur, score, ts = row
+            if score >= 0.95:
+                niveau = "danger"
+                action = "ARRÊT D'URGENCE - Vidange immédiate"
+            elif score >= 0.85:
+                niveau = "critique"
+                action = "Intervention urgente - Réduire la charge"
+            else:
+                niveau = "avertissement"
+                action = "Surveillance renforcée - Préparer inspection"
+            return templates.TemplateResponse(request, "alert_fragment.html", {
+                "mid": mid, "capteur": capteur, "valeur": round(valeur, 2),
+                "score": f"{score:.2f}", "niveau": niveau, "action": action
+            })
+    except:
+        pass
+    return templates.TemplateResponse(request, "alert_fragment.html", {})
+
 @app.get("/status", response_class=HTMLResponse)
 def status_fragment(request: Request):
     status = {"simulateur": "inconnu", "spark": "inconnu", "bridge": "inconnu"}
