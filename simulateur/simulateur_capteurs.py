@@ -56,18 +56,16 @@ while True:
                           "alpha_temp": at, "alpha_vib": av, "scenario": "NORMAL", "timer": 0}
             s = state[mid]
 
-        s["target_temp"] = tt
-        s["target_vib"] = tv
         s["alpha_temp"] = at
         s["alpha_vib"] = av
 
         if s["timer"] <= 0:
             d = scenario_dice if mid == machines[0][0] else random.random()
-            if d < 0.90:
+            if d < 0.80:
                 s["scenario"] = "NORMAL"
                 s["target_temp"] = tt
                 s["target_vib"] = tv
-            elif d < 0.95:
+            elif d < 0.90:
                 s["scenario"] = "SURCHAUFFE"
                 s["target_temp"] = 145.0
                 s["target_vib"] = tv

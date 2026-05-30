@@ -17,8 +17,14 @@
 </div>
 
 <div class="card">
-    <h2>Dernière Prédiction</h2>
-    <div class="val">{{ derniere_pred }}</div>
+    <h2>Anomalies (5 min)</h2>
+    <div class="val">
+        {% if anomalies %}
+            {% for a in anomalies %}{{ a[1] }} {{ a[0] }}{% if not loop.last %}, {% endif %}{% endfor %}
+        {% else %}
+            aucune
+        {% endif %}
+    </div>
 </div>
 
 <div class="card">

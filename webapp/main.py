@@ -46,15 +46,25 @@ def dashboard(request: Request):
         pass
     status["spark"] = "running" if spark_procs > 0 else "stopped"
 
-    derniere_pred = "aucune"
+    anomalies = []
     try:
         conn = db()
         cur = conn.cursor()
-        cur.execute("SELECT score_anomalie, type_capteur, timestamp FROM alertes_predictions ORDER BY timestamp DESC LIMIT 1")
-        row = cur.fetchone()
-        if row:
-            score, capteur, ts = row
-            derniere_pred = f"{capteur}: {score:.4f} a {ts}"
+        cur.execute("""
+            WITH ranked AS (
+                SELECT type_capteur, score_anomalie,
+                    LAG(score_anomalie) OVER (
+                        PARTITION BY type_capteur ORDER BY timestamp
+                    ) as prev_score
+                FROM alertes_predictions
+                WHERE timestamp > NOW() - INTERVAL '5 minutes'
+            )
+            SELECT type_capteur, count(*) FROM ranked
+            WHERE score_anomalie >= 0.7
+                AND (prev_score IS NULL OR prev_score < 0.7)
+            GROUP BY type_capteur ORDER BY type_capteur
+        """)
+        anomalies = cur.fetchall()
         cur.close()
         conn.close()
     except:
@@ -76,7 +86,7 @@ def dashboard(request: Request):
 
     return templates.TemplateResponse(request, "dashboard.html", {
         "status": status,
-        "derniere_pred": derniere_pred,
+        "anomalies": anomalies,
         "nb_machines": nb_machines,
         "machines": machines
     })
